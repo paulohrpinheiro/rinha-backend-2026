@@ -1,0 +1,59 @@
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    image: rinha-backend-proxy:latest
+    ports:
+      - "9999:9999"
+    environment:
+      - BACKENDS=http://api-1:8080,http://api-2:8080
+      - PORT=9999
+    depends_on:
+      api-1:
+        condition: service_started
+      api-2:
+        condition: service_started
+    networks:
+      - rinha-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.05"
+          memory: "20MB"
+
+  api-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: rinha-backend-api:latest
+    environment:
+      - PORT=8080
+      - RESOURCES_DIR=/resources
+    networks:
+      - rinha-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.475"
+          memory: "165MB"
+
+  api-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: rinha-backend-api:latest
+    environment:
+      - PORT=8080
+      - RESOURCES_DIR=/resources
+    networks:
+      - rinha-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.475"
+          memory: "165MB"
+
+networks:
+  rinha-net:
+    driver: bridge
