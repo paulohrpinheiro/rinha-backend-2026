@@ -1,9 +1,6 @@
 services:
   proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile.proxy
-    image: rinha-backend-proxy:latest
+    image: paulohrpopinheiro/rinha-proxy:v1
     ports:
       - "9999:9999"
     environment:
@@ -23,10 +20,7 @@ services:
           memory: "20MB"
 
   api-1:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    image: rinha-backend-api:latest
+    image: paulohrpinheiro/rinha-api:v1
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
@@ -39,10 +33,7 @@ services:
           memory: "165MB"
 
   api-2:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    image: rinha-backend-api:latest
+    image: paulohrpinheiro/rinha-api:v1
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
