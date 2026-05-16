@@ -1,6 +1,6 @@
 services:
   proxy:
-    image: paulohrpopinheiro/rinha-proxy:v1
+    image: paulohrpinheiro/rinha-proxy:v1
     ports:
       - "9999:9999"
     environment:
