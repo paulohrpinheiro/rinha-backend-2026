@@ -1,11 +1,16 @@
+volumes:
+  sock:
+    driver: local
+
 services:
   proxy:
-    image: paulohrpinheiro/rinha-proxy:v7
+    image: paulohrpinheiro/rinha-proxy:v9
     ports:
       - "9999:9999"
     environment:
       - BACKENDS=http://api-1:8080,http://api-2:8080
       - PORT=9999
+      - UNIX_SOCKET_DIR=/run/sock
     depends_on:
       api-1:
         condition: service_started
@@ -13,6 +18,8 @@ services:
         condition: service_started
     networks:
       - rinha-net
+    volumes:
+      - sock:/run/sock
     deploy:
       resources:
         limits:
@@ -20,12 +27,15 @@ services:
           memory: "20MB"
 
   api-1:
-    image: paulohrpinheiro/rinha-api:v7
+    image: paulohrpinheiro/rinha-api:v9
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
+      - UNIX_SOCKET_DIR=/run/sock
     networks:
       - rinha-net
+    volumes:
+      - sock:/run/sock
     deploy:
       resources:
         limits:
@@ -33,12 +43,15 @@ services:
           memory: "165MB"
 
   api-2:
-    image: paulohrpinheiro/rinha-api:v7
+    image: paulohrpinheiro/rinha-api:v9
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
+      - UNIX_SOCKET_DIR=/run/sock
     networks:
       - rinha-net
+    volumes:
+      - sock:/run/sock
     deploy:
       resources:
         limits:
