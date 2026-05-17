@@ -14,10 +14,29 @@ Client -> Proxy -> API #1 e API #2 (round-robin)
 
 | Serviço | CPU | Memória | Função |
 |---------|:---:|:-------:|--------|
-| proxy   | 0.05 | 20 MB | Load balancer round-robin |
+| proxy   | 0.05 | 20 MB | Load balancer round-robin + /ready |
 | api-1   | 0.475 | 165 MB | Detecção de fraude (IVF) |
 | api-2   | 0.475 | 165 MB | Detecção de fraude (IVF) |
 | Total   | 1.0 | 350 MB | — |
+
+---
+
+## Endpoints (porta 9999)
+
+### `GET /ready`
+
+Verificação de prontidão. O **proxy** consulta o `/ready` de cada backend (api-1 e api-2):
+
+| Estado dos backends | Resposta |
+|---|---|
+| Todos respondem 2xx | **HTTP 200** `{"status":"ok","backends":[...]}` |
+| Algum falha | **HTTP 503** `{"status":"degraded","backends":[...]}` |
+
+Isoladamente, cada API também expõe `GET /ready` na porta 8080, respondendo 200 apenas após carregar todo o dataset e construir o índice IVF.
+
+### `POST /fraud-score`
+
+Processa a transação e retorna a decisão de fraude. O proxy distribui as requisições em round-robin entre api-1 e api-2. Consulte [docs/API.md](./docs/API.md) para o contrato completo.
 
 ---
 
@@ -26,7 +45,7 @@ Client -> Proxy -> API #1 e API #2 (round-robin)
 ```
 cmd/
   api/main.go          # Servidor HTTP da API
-  proxy/main.go        # Load balancer round-robin
+  proxy/main.go        # Load balancer round-robin com /ready local
 internal/
   model/types.go       # Tipos: payload, resposta, normalização
   vector/normalize.go  # Vetor 14-dim + quantização int8 + Manhattan
@@ -49,8 +68,9 @@ resources/             # Dataset (copiado no build Docker)
   normalization.json   # Constantes de normalização
 Dockerfile.api         # Multi-stage: golang -> scratch
 Dockerfile.proxy       # Multi-stage: golang -> scratch
-docker-compose.yml     # Orquestração: proxy + 2 APIs
-Makefile               # build, test, docker, etc.
+docker-compose.yml     # Orquestração local (com build)
+docker-compose.submission.yml # Orquestração para submission (Docker Hub)
+Makefile               # build, test, docker, push, submission-prep
 go.mod / go.sum        # Zero dependências externas
 info.json              # Metadados da submissão
 README.md              # Este arquivo
@@ -100,10 +120,14 @@ Baixe do [repositório oficial da Rinha](https://github.com/zanfranceschi/rinha-
 | `make build` | Compila binários estripados em bin/ |
 | `make test` | Roda todos os testes |
 | `make bench` | Roda benchmarks |
-| `make docker-build` | Constrói imagens Docker |
-| `make docker-up` | docker compose up -d |
+| `make docker-build VERSION=v2` | Constrói imagens Docker com a versão |
+| `make docker-push VERSION=v2` | Envia imagens para o Docker Hub |
+| `make docker-tag-latest VERSION=v2` | Tagueia como latest e envia |
+| `make docker-up` | docker compose up -d (build local) |
 | `make docker-down` | docker compose down |
 | `make docker-logs` | docker compose logs -f |
+| `make docker-up-submission` | Sobe com docker-compose.submission.yml |
+| `make submission-file VERSION=v2` | Gera docker-compose.yml para submission |
 | `make clean` | Remove bin/ |
 | `make all` | build + test |
 
@@ -132,31 +156,48 @@ Multi-stage build com scratch:
 
 Imagens finais: ~10-15 MB, sem shell ou libc.
 
+### Publicação no Docker Hub
+
+```bash
+make docker-build VERSION=v2
+make docker-push VERSION=v2
+make docker-tag-latest VERSION=v2  # opcional
+```
+
 ---
 
 ## Submissão
 
 > ⚠️ O repositório precisa ter ao menos **um commit** antes de criar a branch submission.
 
-### 1. Commit inicial na main
+A branch `submission` é uma orphan branch independente — alterações na `main` **não** propagam automaticamente para ela. Siga o fluxo abaixo a cada nova versão.
+
+### Fluxo completo (a partir da main)
 
 ```bash
-git checkout -b main
+# 1. Altera o código, testa, commita na main
 git add .
-git commit -m "feat: initial implementation"
-git push -u origin main
-```
+git commit -m "feat: descrição da mudança"
 
-### 2. Criar branch submission (orphan)
+# 2. Sobe nova versão para o Docker Hub
+make docker-build VERSION=v2
+make docker-push VERSION=v2
 
-```bash
-git checkout --orphan submission
-git rm -r .
-git add docker-compose.yml Dockerfile.* info.json
-git commit -m "submission: deployment files"
+# 3. Gera o docker-compose.yml com a versão correta
+make submission-file VERSION=v2 > /tmp/dc-submission.yml
+
+# 4. Cria/atualiza a branch submission
+git checkout --orphan submission            # primeira vez
+# git checkout submission && git rm -r .    # atualização
+
+cp /tmp/dc-submission.yml docker-compose.yml
+git add docker-compose.yml Dockerfile.api Dockerfile.proxy info.json
+git commit -m "submission: v2"
 git push -u origin submission
 git checkout main  # volta para a main
 ```
+
+> O `docker-compose.yml` na branch submission **não** contém `build:` — ele referencia diretamente as imagens do Docker Hub (`paulohrpinheiro/rinha-api:v2`, etc.). Isso é necessário porque a submission não tem o código-fonte.
 
 > **Importante**: `git rm -r .` falha com *"pathspec '.' did not match any files"* se não houver commit anterior. O comando só remove arquivos **trackeados** (que estão no índice git). Primeiro commite na main, depois crie a orphan branch.
 
@@ -178,9 +219,12 @@ Documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)** — arquivo de contex
 | 08 | Pré-carregamento | Startup lento, zero CPU durante teste |
 | 09 | 350 MB total | Proxy 20MB + 2xAPI 165MB |
 | 10 | Só stdlib | Nenhuma dependência externa |
+| 11 | Proxy serve /ready | Evita 502 enquanto APIs carregam |
+| 12 | Imagens versionadas | Tag fixa evita cache no test runner |
 
 ---
 
 ## Licença
 
 MIT
+

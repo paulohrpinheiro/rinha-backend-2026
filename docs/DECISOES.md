@@ -1,6 +1,6 @@
 # Decisões Arquiteturais — Rinha de Backend 2026
 
-> Data: 2026-05-14
+> Data: 2026-05-16
 > Stack: Go 1.26.3
 
 ---
@@ -57,16 +57,25 @@ complexa de implementar em Go puro.
 
 ---
 
-## ADR-04: Proxy em Go (standard library)
+## ADR-04: Proxy em Go (standard library) com /ready local
 
-**Contexto**: Load balancer round-robin sem lógica de negócio.
+**Contexto**: Load balancer round-robin sem lógica de negócio. O endpoint `GET /ready` (na porta
+9999) precisa responder mesmo que as APIs ainda estejam carregando o dataset.
 
-**Decisão**: Implementar com net/http/httputil.ReverseProxy da stdlib.
+**Decisão**: Implementar o proxy com `net/http/httputil.ReverseProxy` da stdlib para
+`POST /fraud-score`, e um `http.ServeMux` que roteia `GET /ready` para um handler local.
+
+O handler `/ready` no proxy:
+1. Faz `GET /ready` em cada backend (api-1 e api-2) com timeout de 1s
+2. Se todos responderem 2xx → retorna HTTP 200
+3. Se algum falhar → retorna HTTP 503
 
 **Consequências**:
 - Zero dependências externas.
 - Binário mínimo (< 5 MB stripped).
-- Round-robin com sync/atomic.
+- Round-robin com `sync/atomic`.
+- `/ready` nunca devolve 502 (proxy error) — se os backends estão carregando, o proxy devolve 503
+  informando quais estão indisponíveis.
 
 ---
 
@@ -87,7 +96,6 @@ complexa de implementar em Go puro.
 **Consequências**: Imagem final ~10-15 MB comprimida, sem shell ou libc.
 
 ---
-
 
 ## ADR-07: Branch submission como orphan branch
 
@@ -116,15 +124,22 @@ O repositório precisa ter ao menos **um commit** antes de criar a orphan branch
 
 ---
 
-## ADR-08
+## ADR-08: Startup lento com dados pré-carregados
+
+**Contexto**: O servidor HTTP da API deve responder apenas quando todos os dados estiverem
+carregados e o índice IVF estiver pronto para consultas.
 
 **Decisão**: No startup de cada API:
 1. Carregar normalization.json e mcc_risk.json
 2. Decompress + parse de references.json.gz
 3. Executar K-means para construir IVF index
-4. Só então responder 200 em GET /ready
+4. Só então iniciar o servidor HTTP e responder 200 em GET /ready
 
 **Consequências**: Startup mais lento (~5-15s), zero processamento durante o teste.
+
+**Nota**: O endpoint `GET /ready` na porta 9999 (proxy) é independente — o proxy o serve
+localmente e verifica a saúde dos backends. Ou seja, o `/ready` público nunca fica
+indisponível por 502, mesmo durante o startup das APIs.
 
 ---
 
@@ -149,9 +164,58 @@ Pacotes: net/http, encoding/json, compress/gzip, math/rand/v2, slices, cmp, sync
 
 ---
 
+## ADR-11: Proxy serve /ready localmente
+
+**Contexto**: O endpoint `GET /ready` na porta 9999 (`docs/API.md`) precisa responder sempre.
+Anteriormente, o proxy encaminhava `/ready` para os backends, que devolviam 502 (Bad Gateway)
+enquanto carregavam o dataset (~5-15s de startup).
+
+**Decisão**: O proxy passou a servir `GET /ready` localmente, usando um
+`http.ServeMux` para rotear:
+
+- `GET /ready` → `ReadyHandler` (local): consulta `GET /ready` de cada backend
+- `/` (qualquer outra rota) → `RoundRobinProxy` (round-robin)
+
+O `ReadyHandler` usa `http.Client` com timeout de 1s para verificar cada backend.
+
+**Consequências**:
+- `/ready` nunca retorna 502 — se backends estão carregando, retorna 503 com detalhes.
+- O proxy continua sem lógica de negócio no fluxo de `POST /fraud-score`.
+- Código mais robusto: o test runner pode consultar `/ready` a qualquer momento.
+
+---
+
+## ADR-12: Imagens versionadas para Docker Hub
+
+**Contexto**: A branch `submission` não contém código-fonte, apenas arquivos de deploy.
+O `docker-compose.yml` da submission não pode ter `build:` (falta o `cmd/` e `internal/`).
+
+**Decisão**:
+1. Manter dois arquivos de orquestração:
+   - `docker-compose.yml` (main branch) — com `build:` para desenvolvimento local
+   - `docker-compose.submission.yml` (main branch) — template sem `build:`, com image tags
+     variáveis para Docker Hub
+2. Usar tags de versão específicas (`v1`, `v2`, ...) em vez de `:latest` — o test runner
+   pode ter cache local com `:latest` antigo
+3. O Makefile tem o target `submission-file` que gera o `docker-compose.yml` da submission
+   com a versão correta:
+   ```bash
+   make submission-file VERSION=v2 > docker-compose.yml
+   ```
+4. Workflow: `make docker-build` + `make docker-push` na main → gerar arquivo →
+   commitar na orphan branch submission
+
+**Consequências**:
+- Submission branch autocontida e independente.
+- Versão explícita e rastreável em cada submission.
+- `:latest` opcional (target `docker-tag-latest`) para referência rápida.
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões
 - [DATASET.md](./DATASET.md) — formato dos arquivos de referência
 - [ARQUITETURA.md](./ARQUITETURA.md) — limites de CPU/memória
 - [BUSCA_VETORIAL.md](./BUSCA_VETORIAL.md) — introdução à busca vetorial
+- [API.md](./API.md) — contrato da API
