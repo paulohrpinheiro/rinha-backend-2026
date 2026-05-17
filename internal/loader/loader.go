@@ -43,7 +43,8 @@ func LoadMCCRisk(path string) (map[string]float64, error) {
 	return mcc, nil
 }
 
-// LoadReferences reads and quantizes the full reference dataset from a gzip file.
+// LoadReferences reads and quantizes the full reference dataset from a gzip file
+// using streaming JSON to avoid loading all float64 vectors into memory at once.
 // Returns the quantized vectors and labels (0=legit, 1=fraud).
 func LoadReferences(path string) ([]vector.Vector14, []uint8, error) {
 	f, err := os.Open(path)
@@ -58,22 +59,41 @@ func LoadReferences(path string) ([]vector.Vector14, []uint8, error) {
 	}
 	defer gr.Close()
 
-	var refs []Reference
 	dec := json.NewDecoder(gr)
-	if err := dec.Decode(&refs); err != nil {
+
+	// Read opening '['
+	t, err := dec.Token()
+	if err != nil {
 		return nil, nil, err
 	}
+	if t != json.Delim('[') {
+		return nil, nil, nil // empty
+	}
 
-	vectors := make([]vector.Vector14, len(refs))
-	labels := make([]uint8, len(refs))
+	// Pre-allocate for 3M vectors (will grow if needed)
+	vectors := make([]vector.Vector14, 0, 3_000_000)
+	labels := make([]uint8, 0, 3_000_000)
 
-	for i, ref := range refs {
+	// Process each reference individually using streaming
+	for dec.More() {
+		var ref Reference
+		if err := dec.Decode(&ref); err != nil {
+			return nil, nil, err
+		}
+
+		var v vector.Vector14
 		for d := 0; d < 14; d++ {
-			vectors[i][d] = vector.Quantize(ref.Vector[d])
+			v[d] = vector.Quantize(ref.Vector[d])
 		}
+		var label uint8
 		if ref.Label == "fraud" {
-			labels[i] = 1
+			label = 1
 		}
+		vectors = append(vectors, v)
+		labels = append(labels, label)
+
+		// Allow GC to reclaim the float64 slice immediately
+		ref.Vector = nil
 	}
 
 	return vectors, labels, nil
@@ -111,8 +131,11 @@ func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]
 	clusterAssign := make([]int, n) // temp storage
 
 	for iter := 0; iter < 5; iter++ {
-		// Pick random batch
-		batch := rng.Perm(n)[:batchSize]
+		// Pick random batch — avoid rng.Perm(n) which allocates n ints (~24MB)
+		batch := make([]int, batchSize)
+		for i := range batch {
+			batch[i] = rng.IntN(n)
+		}
 
 		// For each batch vector, assign to nearest centroid
 		for _, idx := range batch {

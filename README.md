@@ -51,7 +51,7 @@ internal/
   vector/normalize.go  # Vetor 14-dim + quantização int8 + Manhattan
   index/index.go       # IVF Index (Inverted File Index)
   handler/fraud.go     # Handlers HTTP (/ready, /fraud-score)
-  loader/loader.go     # Carregamento do dataset + clustering
+  loader/loader.go     # Carregamento streaming do dataset + clustering IVF
   *_test.go            # Testes unitários e benchmarks
 docs/
   DECISOES.md          # Decisões arquiteturais (contexto para IA)
@@ -80,18 +80,25 @@ README.md              # Este arquivo
 
 ## Como Funciona
 
-### 1. Recebimento
+### 1. Startup (pré-carregamento)
+No startup, a API carrega os 3M vetores de `references.json.gz` em **modo streaming** (um
+`Reference` por vez) para evitar estourar o limite de memória de 165MB. Cada vetor de 14
+float64 é imediatamente quantizado para int8 e descartado. Em seguida, constrói o índice
+IVF com K-means (5 iterações em mini-batches). O servidor HTTP só começa a responder após
+o índice estar pronto.
+
+### 2. Recebimento
 `POST /fraud-score` recebe JSON com dados da transação.
 
-### 2. Vetorização (14 dimensões)
+### 3. Vetorização (14 dimensões)
 Cada campo é normalizado para [0,1] seguindo as fórmulas em [REGRAS_DE_DETECCAO.md](./docs/REGRAS_DE_DETECCAO.md) e quantizado para int8 (0-127), reduzindo 4x o uso de memória.
 
-### 3. Busca Vetorial (IVF Index)
+### 4. Busca Vetorial (IVF Index)
 - Encontra o cluster mais próximo entre 1.000 centroides
 - Busca os 5 vizinhos mais próximos dentro desse cluster (~3.000 vetores)
 - Usa distância Manhattan com loop unrolled
 
-### 4. Decisão
+### 5. Decisão
 ```
 fraud_score = fraudes_entre_os_5 / 5
 approved = fraud_score < 0.6
@@ -221,6 +228,7 @@ Documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)** — arquivo de contex
 | 10 | Só stdlib | Nenhuma dependência externa |
 | 11 | Proxy serve /ready | Evita 502 enquanto APIs carregam |
 | 12 | Imagens versionadas | Tag fixa evita cache no test runner |
+| 13 | Streaming JSON loading | Evita OOM durante startup (114MB pico vs 165MB limite) |
 
 ---
 

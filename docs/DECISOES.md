@@ -212,6 +212,45 @@ O `docker-compose.yml` da submission não pode ter `build:` (falta o `cmd/` e `i
 
 ---
 
+## ADR-13: Carregamento streaming do JSON para evitar OOM
+
+**Contexto**: O JSON de referências (`references.json.gz`) tem ~298MB descomprimido com 3M
+entradas. Cada entrada contém um `vector` de 14 float64 (112 bytes) + label. O decode ingênuo
+com `json.Decoder.Decode(&refs)` carrega **todas as 3M entradas na memória como `[]Reference`**,
+consumindo ~450MB — muito além do limite de 165MB por API. O container morria com exit code 137
+(SIGKILL/OOM killer).
+
+**Decisão**: Processar o JSON em **modo streaming**:
+1. Ler o `[` inicial com `dec.Token()`
+2. Para cada elemento (enquanto `dec.More()`):
+   - Decodificar um `Reference` individual
+   - Quantizar imediatamente os 14 floats para `Vector14` (int8)
+   - Atribuir o label (0 ou 1)
+   - Fazer `ref.Vector = nil` para o GC coletar o `[]float64` imediatamente
+   - Fazer `append` nos slices finais
+3. Os slices `vectors` e `labels` são pré-alocados com capacidade 3.000.000 para
+   minimizar realocações durante o `append`
+
+Além disso, no `BuildIVFIndex`, substituiu-se `rng.Perm(n)` (que aloca `[]int` de 3M
+elementos = 24MB) por `make([]int, batchSize)` + `rng.IntN(n)`, alocando apenas 1.2MB.
+
+**Pico de memória durante startup**:
+
+| Etapa | Memória |
+|-------|:-------:|
+| Loading streaming (1 ref por vez) | ~50 MB |
+| Após loading (vectors + labels) | ~45 MB |
+| BuildIVFIndex (clusterAssign + reordered) | ~114 MB (pico) |
+| **Pico total** | **~114 MB** |
+
+**Consequências**:
+- Resolve o OOM killer — pico de 114MB dentro do limite de 165MB.
+- Startup ~5s mais lento devido ao streaming (I/O sequencial vs bulk decode).
+- Nenhuma alocação extra no runtime: após o startup, a API opera com ~47MB fixos.
+- `json.NewDecoder` em modo streaming é tão rápido quanto bulk para arquivos grandes.
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões
