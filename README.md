@@ -79,6 +79,55 @@ README.md              # Este arquivo
 
 ---
 
+## Resultados do Teste Oficial
+
+> Commit: `422a8ac` · Score final: **−6000** (pior possível)
+
+### Breakdown
+
+| Componente | Valor | Corte ativado? |
+|:-----------|:-----:|:--------------:|
+| `score_p99` | **−3000** | ✅ p99 = 2001.95ms > 2000ms |
+| `score_det` | **−3000** | ✅ failure_rate = 96.69% > 15% |
+| **Final** | **−6000** | ⛔ Piso absoluto |
+
+### O que aconteceu
+
+A qualidade de **detecção é excelente** — das 1.386 respostas que chegaram a ser processadas:
+
+| Métrica | Valor | % |
+|:--------|:-----:|:-:|
+| True Positive (fraude correta) | 587 | 42.3% |
+| True Negative (legítima correta) | 769 | 55.5% |
+| False Positive (falso alarme) | 16 | 1.2% |
+| False Negative (fraude escapou) | 14 | 1.0% |
+| **Acurácia** | **97.8%** | 🎯 |
+
+O problema não é **o quê** a API decide — é que ela **não consegue responder a tempo**.
+
+### Causa raiz
+
+| Problema | Evidência |
+|:---------|:----------|
+| **39.554 erros HTTP** (73% das req) | APIs não responderam dentro do timeout do k6 (2001ms) |
+| **p99 = 2001.95ms** | Exatamente no limite do timeout — requisições estouraram |
+| **Nenhum timeout HTTP configurado** | `http.ListenAndServe` sem `ReadTimeout`, `WriteTimeout`, `IdleTimeout` |
+| **Sem limitador de concorrência** | Goroutines ilimitadas sob 0.475 CPU causam thrashing no GC |
+
+### Lições Aprendidas
+
+| Lição | Descrição |
+|:-----|:----------|
+| ⏱️ **Sempre configurar timeouts HTTP** | `http.Server` sem timeouts é uma bomba-relógio sob carga. `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` e `IdleTimeout` são obrigatórios. |
+| 🚦 **Limitar concorrência** | Um semáforo simples (`chan struct{}`) evita que uma rajada de requisições exploda o número de goroutines e paralise o GC. |
+| 🔄 **Tuning do proxy transport** | `MaxIdleConnsPerHost`, `IdleConnTimeout` e `DialContext.Timeout` no `http.Transport` do proxy evitam criação excessiva de conexões TCP. |
+| 📊 **503 imediato > timeout de 2s** | Responder com HTTP 503 ("too many requests") em <1ms é muito melhor que deixar a conexão aberta até o timeout do cliente. |
+| 🧪 **Testar com carga real antes** | Testes unitários não revelam problemas de concorrência. Um teste de carga com k6 (mesmo que reduzido) teria detectado o problema. |
+
+As correções propostas estão documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)** (ADR-15 e ADR-16).
+
+---
+
 ## Como Funciona
 
 ### 1. Startup (índice pré-construído)

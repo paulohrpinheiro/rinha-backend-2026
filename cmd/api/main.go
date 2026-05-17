@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"rinha-backend/internal/handler"
 	"rinha-backend/internal/index"
@@ -86,7 +87,16 @@ func main() {
 	mux.HandleFunc("POST /fraud-score", h.FraudScore)
 
 	log.Printf("API server starting on port %s\n", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 1 * time.Second,
+		ReadTimeout:       2 * time.Second,
+		WriteTimeout:      2 * time.Second,
+		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    4096,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }

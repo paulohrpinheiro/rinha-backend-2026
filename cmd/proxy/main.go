@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -114,13 +115,27 @@ func main() {
 		backends: make([]*httputil.ReverseProxy, len(backendsList)),
 	}
 	backendInfos := make([]BackendInfo, 0, len(backendsList))
+
+	// Configure HTTP transport with connection pooling and timeouts
+	proxyTransport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 50,
+		IdleConnTimeout:     30 * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   2 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
+
 	for i, b := range backendsList {
 		trimmed := strings.TrimSpace(b)
 		backendInfos = append(backendInfos, BackendInfo{
 			RawURL:   trimmed,
 			ReadyURL: strings.TrimRight(trimmed, "/") + "/ready",
 		})
-		proxy.backends[i] = httputil.NewSingleHostReverseProxy(mustParseURL(trimmed))
+		rp := httputil.NewSingleHostReverseProxy(mustParseURL(trimmed))
+		rp.Transport = proxyTransport
+		proxy.backends[i] = rp
 	}
 
 	port := os.Getenv("PORT")

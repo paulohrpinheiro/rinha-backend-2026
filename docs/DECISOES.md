@@ -300,6 +300,139 @@ usando `unsafe` para conversão eficiente entre `[]byte` e `[]int8`.
 
 ---
 
+## ADR-15: Timeouts no servidor HTTP
+
+**Contexto**: O servidor HTTP da API usava `http.ListenAndServe(":"+port, mux)` — sem
+qualquer configuração de timeout. Em Go, o `http.Server` default tem todos os timeouts
+em zero, o que significa **nenhum limite** para quanto tempo uma conexão pode ficar
+aberta lendo o header, lendo o body, escrevendo a resposta ou em idle.
+
+O proxy também usava `httputil.NewSingleHostReverseProxy` com o `http.Transport`
+default — sem `MaxIdleConns`, `MaxIdleConnsPerHost`, `IdleConnTimeout` ou
+`DialContext.Timeout`.
+
+**Problema observado**: No teste oficial (commit `422a8ac`), com 54.100 requisições
+para 2 APIs com 0.475 CPU cada:
+
+| Métrica | Valor |
+|:--------|:-----:|
+| Erros HTTP | 39.554 (73%) |
+| p99 | 2001.95ms |
+| Score final | **−6000** |
+
+O p99 de **2001.95ms** é virtualmente idêntico ao timeout do k6 (2001ms, conforme
+`docs/AVALIACAO.md`). Isso indica que a vasta maioria das requisições **estourou o
+timeout do teste** porque o servidor não conseguia processá-las a tempo.
+
+A causa raiz foi identificada como:
+
+1. **Ausência de timeouts** → conexões acumulam, centenas de goroutines concorrentes
+   pressionam o GC e consomem CPU em barriers de memória em vez de processar requisições.
+2. **Sem limitador de concorrência** → uma rajada de requisições spawna goroutines
+   ilimitadas, causando thrashing no GC sob 0.475 CPU.
+3. **Transport do proxy sem tuning** → conexões HTTP para os backends não eram
+   reutilizadas eficientemente, e podiam ficar em TIME_WAIT.
+
+**Decisão**: Configurar `http.Server` com timeouts explícitos e migrar de
+`http.ListenAndServe` para `&http.Server{...}`:
+
+```go
+srv := &http.Server{
+    Addr:              ":" + port,
+    Handler:           mux,
+    ReadHeaderTimeout: 1 * time.Second,
+    ReadTimeout:       2 * time.Second,
+    WriteTimeout:      2 * time.Second,
+    IdleTimeout:       30 * time.Second,
+    MaxHeaderBytes:    4096,
+}
+if err := srv.ListenAndServe(); err != nil {
+    log.Fatalf("Server error: %v", err)
+}
+```
+
+No proxy, configurar o `http.Transport`:
+
+```go
+proxy.Transport = &http.Transport{
+    MaxIdleConns:        100,
+    MaxIdleConnsPerHost: 50,
+    IdleConnTimeout:     30 * time.Second,
+    DialContext: (&net.Dialer{
+        Timeout:   2 * time.Second,
+        KeepAlive: 30 * time.Second,
+    }).DialContext,
+}
+```
+
+**Consequências**:
+- Timeouts evitam o acúmulo de conexões lentas ou maliciosas.
+- `IdleTimeout` permite que conexões keep-alive ociosas sejam recicladas.
+- `ReadTimeout` cobre tanto `ReadHeaderTimeout` quanto o tempo de leitura do body
+  (`ReadHeaderTimeout` + tempo restante em `ReadTimeout`).
+- Conexões que ultrapassam 2s de leitura ou escrita são fechadas, impedindo o
+  efeito "cauda longa" de requisições lentas.
+- No proxy, `MaxIdleConnsPerHost=50` permite reutilizar conexões sem criar novas
+  a cada requisição — reduz latência de conexão TCP e evita esgotamento de portas efêmeras.
+
+---
+
+## ADR-16: Limitador de concorrência (semáforo) na API
+
+**Contexto**: Com 0.475 CPU por API e 165MB de RAM, processar centenas de
+requisições simultâneas cria pressão insustentável no GC. Cada requisição aloca
+memória para parse do JSON (payload da transação com ~300 bytes), vetor
+temporário e resultados da busca. Sob carga alta, o GC dispara repetidamente,
+consumindo CPU que deveria estar processando requisições.
+
+**Problema observado**: Durante o teste oficial, apenas ~1.386 requisições foram
+processadas com sucesso — o resto (39.554) estourou timeout. A baixa vazão mesmo
+com um índice IVF que faz busca em ~14μs indica que o servidor estava ocupado
+com coleta de lixo e contenção de goroutines, não com busca vetorial.
+
+**Decisão**: Implementar um semáforo estilo worker pool limitando o número de
+requisições concorrentes na API:
+
+```go
+var sem = make(chan struct{}, 64) // máximo 64 requisições simultâneas
+
+func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
+    select {
+    case sem <- struct{}{}:
+        defer func() { <-sem }()
+    default:
+        // Se o semáforo estiver cheio, responde com 503 imediatamente
+        // em vez de deixar a requisição acumular
+        http.Error(w, `{"error":"too many requests"}`, http.StatusServiceUnavailable)
+        return
+    }
+    // ... processamento normal ...
+}
+```
+
+**Parâmetros**: O limite de 64 concorrentes foi escolhido porque:
+- Cada requisição leva ~0.5ms de CPU para processar (normalização + busca IVF)
+- 64 concorrentes × 0.5ms = 32ms de CPU simultânea
+- Com 0.475 CPU, 32ms de trabalho simultâneo é viável sem sobrecarregar o GC
+- 64 buffers de payload (~300 bytes cada) = ~19KB adicionais na heap — irrelevante
+
+**Alternativa considerada**: Usar `rate.Limiter` do `golang.org/x/time/rate`.
+Rejeitado pela ADR-10 (zero dependências externas). O semáforo com channel é
+stdlib puro.
+
+**Consequências**:
+- Em vez de 200 goroutines lentas todas fazendo GC, temos no máximo 64 goroutines
+  rápidas — a fila de requisições fica no kernel (accept queue do TCP), não na
+  user space.
+- Respostas 503 "too many requests" contam como erro HTTP no scoring, mas são
+  **muito melhores** que timeouts de 2001ms: um 503 imediato consome <1ms de CPU
+  e libera a conexão instantaneamente, enquanto um timeout queima 2s de socket.
+- A taxa de falhas sobe um pouco (503s entram em `Err`), mas o volume de 503s
+  tende a ser baixo se o limite for calibrado corretamente — muito menor que os
+  73% de timeouts observados.
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões
@@ -307,3 +440,4 @@ usando `unsafe` para conversão eficiente entre `[]byte` e `[]int8`.
 - [ARQUITETURA.md](./ARQUITETURA.md) — limites de CPU/memória
 - [BUSCA_VETORIAL.md](./BUSCA_VETORIAL.md) — introdução à busca vetorial
 - [API.md](./API.md) — contrato da API
+- [AVALIACAO.md](./AVALIACAO.md) — fórmula de pontuação (timeout de 2001ms, corte de 15%)

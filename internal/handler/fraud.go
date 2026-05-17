@@ -11,6 +11,12 @@ import (
 	"rinha-backend/internal/vector"
 )
 
+// semaphore limits concurrent fraud-score requests to prevent
+// goroutine explosion and GC thrashing under high load.
+// 64 is enough for 0.475 CPU: each request takes ~0.5ms, so 64
+// concurrent = ~32ms of parallel CPU work, well within budget.
+var semaphore = make(chan struct{}, 64)
+
 // FraudHandler holds dependencies for the HTTP handlers.
 type FraudHandler struct {
 	index   *index.IVFIndex
@@ -27,7 +33,7 @@ func New(idx *index.IVFIndex, norm *model.Normalization, mccRisk map[string]floa
 	}
 }
 
-// Ready handles GET /ready — returns 200 when the service is ready.
+// Ready handles GET /ready — returns  ready — returns 200 when the service is ready.
 func (h *FraudHandler) Ready(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
@@ -35,6 +41,15 @@ func (h *FraudHandler) Ready(w http.ResponseWriter, r *http.Request) {
 
 // FraudScore handles POST /fraud-score — processes a transaction and returns the fraud decision.
 func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
+	// Acquire semaphore slot; return 503 immediately if at capacity
+	select {
+	case semaphore <- struct{}{}:
+		defer func() { <-semaphore }()
+	default:
+		http.Error(w, `{"error":"too many requests"}`, http.StatusServiceUnavailable)
+		return
+	}
+
 	// Parse request body
 	var payload model.TransactionPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
