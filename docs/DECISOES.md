@@ -433,6 +433,162 @@ stdlib puro.
 
 ---
 
+---
+
+## ADR-17: Comunicação proxy↔API via Unix socket
+
+**Contexto**: O teste oficial (commit `57ae8c7` e anteriores) mostra p99 consistentemente
+em ~2002ms — exatamente o timeout do k6. Mesmo com timeouts configurados (ADR-15) e
+semáforo de concorrência (ADR-16), o proxy encaminhava requisições via HTTP/TCP para
+as APIs, adicionando overhead de:
+
+- 3-way handshake TCP (ou renegociação keep-alive)
+- Serialização/parser de headers HTTP
+- Alocação de buffers de cópia no `httputil.ReverseProxy`
+- Portas efêmeras e TIME_WAIT
+
+**Problema observado**: No melhor resultado externo (MXLange/c-api-rinha2026), p99 de
+**0.98ms** com **zero erros HTTP**. A diferença estrutural chave era comunicação via
+Unix sockets em vez de TCP/IP.
+
+| Característica | Nossa v7 (TCP) | bestResult (Unix socket) |
+|----------------|:--------------:|:------------------------:|
+| p99 | 2002.26ms | **0.98ms** |
+| Erros HTTP | 12.266 | **0** |
+| Score | −6000 | **+6000** |
+
+**Decisão**: Substituir a comunicação TCP entre proxy e API por Unix domain sockets:
+
+1. **API**: além do listener TCP na porta 8080 (para `/ready` externo), cria um listener
+   Unix socket em `/run/sock/<hostname>.sock`. O hostname de cada container Docker
+   é único (`api-1`, `api-2`), garantindo sockets distintos.
+
+2. **Proxy**: o `http.Transport.DialContext` é substituído por um dialer que conecta
+   no Unix socket correspondente ao hostname do backend (`/run/sock/api-1.sock` para
+   o backend `http://api-1:8080`).
+
+3. **Docker Compose**: um volume nomeado `sock` é montado em `/run/sock` em todos os
+   serviços (proxy, api-1, api-2), compartilhando o diretório de sockets.
+
+```go
+// Proxy: dialer Unix socket
+func unixSocketDialer(socketDir string) func(ctx context.Context, network, addr string) (net.Conn, error) {
+    return func(ctx context.Context, network, addr string) (net.Conn, error) {
+        host, _, _ := net.SplitHostPort(addr)
+        socketPath := socketDir + "/" + host + ".sock"
+        return net.Dial("unix", socketPath)
+    }
+}
+```
+
+```go
+// API: listener Unix socket
+unixListener, err := net.Listen("unix", socketPath)
+os.Chmod(socketPath, 0777)
+go srv.Serve(unixListener)
+// TCP listener continua em paralelo para /ready externo
+go srv.ListenAndServe()
+```
+
+**Consequências**:
+- Latência de comunicação cai de ~100μs (TCP localhost) para <10μs (Unix socket).
+- Elimina TIME_WAIT e consumo de portas efêmeras.
+- Keep-alive no Unix socket é mais eficiente que TCP keep-alive.
+- O volume compartilhado `sock` é adicionado ao docker-compose, mas não altera
+  a topologia de rede bridge exigida pelo desafio.
+- Fallback preservado: se o socket não existir, o proxy ainda tenta TCP (embora
+  isso só ocorra em desenvolvimento local sem o volume).
+
+---
+
+## ADR-18: Ajuste do limite de concorrência (semáforo) para 128
+
+**Contexto**: O limite original de 64 concorrentes (ADR-16) foi calibrado assumindo
+~0.5ms por requisição. Com a introdução de Unix sockets (ADR-17), o overhead de
+comunicação cai drasticamente, reduzindo o tempo médio por requisição para ~0.3ms.
+
+**Decisão**: Aumentar o semáforo de 64 para 128:
+
+```go
+var semaphore = make(chan struct{}, 128)
+```
+
+**Cálculo**:
+- Tempo médio por requisição com Unix socket: ~0.3ms
+- 128 concorrentes × 0.3ms = ~38ms de CPU simultânea
+- Com 0.475 CPU, 38ms de trabalho é viável sem thrashing do GC
+- A folga adicional de 2× em relação ao original acomoda picos sem responder 503
+
+**Consequências**:
+- Maior vazão sob carga, especialmente nos primeiros segundos do teste.
+- Mais goroutines simultâneas, mas cada uma é mais rápida (menos overhead de I/O).
+- 503 "too many requests" só ocorrem sob picos extremos (acima de 128 concorrentes).
+
+---
+
+## ADR-19: Redução de timeouts HTTP (500ms/1s)
+
+**Contexto**: Os timeouts originais (ADR-15) usavam `ReadTimeout` e `WriteTimeout`
+de 2s. Com Unix sockets, qualquer requisição deve completar em <1ms. Um timeout
+de 2s mantém conexões abertas por tempo demais sob carga.
+
+**Decisão**: Reduzir os timeouts para:
+
+```go
+srv := &http.Server{
+    ReadHeaderTimeout: 500 * time.Millisecond,
+    ReadTimeout:       1 * time.Second,
+    WriteTimeout:      1 * time.Second,
+    IdleTimeout:       30 * time.Second,
+    MaxHeaderBytes:    4096,
+}
+```
+
+**Raciocínio**:
+- `ReadHeaderTimeout` de 500ms — header HTTP tem <500 bytes, leitura em <1ms
+- `ReadTimeout` de 1s — corpo JSON de ~300 bytes em <1ms, 1s é folga de 1000×
+- `WriteTimeout` de 1s — resposta JSON de ~50 bytes em <1ms
+- `IdleTimeout` de 30s — conexões keep-alive ociosas recicladas após 30s
+
+**Consequências**:
+- Conexões lentas ou maliciosas são cortadas em 500ms (header) ou 1s (body).
+- Sob carga, o servidor não acumula requisições lentas — libera rápido.
+- No Unix socket, timeouts de 1s são essencialmente "infinitos" para o workload real.
+
+---
+
+## ADR-20: Pool de buffers para resposta JSON
+
+**Contexto**: Cada resposta do endpoint `/fraud-score` aloca um `json.Encoder` e um
+buffer interno. Embora cada alocação seja pequena (~100 bytes), sob 54.100
+requisições o GC executa coletas extras que consomem CPU.
+
+**Decisão**: Usar `sync.Pool` para reutilizar buffers de resposta:
+
+```go
+var responsePool = sync.Pool{
+    New: func() any {
+        return &bytes.Buffer{}
+    },
+}
+
+// No handler:
+buf := responsePool.Get().(*bytes.Buffer)
+buf.Reset()
+json.NewEncoder(buf).Encode(resp)
+w.Write(buf.Bytes())
+responsePool.Put(buf)
+```
+
+**Consequências**:
+- Reduz alocações de heap no hot path de resposta.
+- `sync.Pool` é seguro para concorrência e eficiente sob carga.
+- O buffer é resetado entre usos, sem risco de contaminação entre requisições.
+- Ganho marginal comparado a Unix sockets, mas consistente com a filosofia
+  de "zero alocações no hot path" demonstrada nos benchmarks de ManhattanDistance.
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões

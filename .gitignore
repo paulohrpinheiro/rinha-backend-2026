@@ -1,0 +1,5 @@
+api
+proxy
+bin/
+lastResult*.json
+bestResult.json

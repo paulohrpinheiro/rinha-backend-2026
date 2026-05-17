@@ -1,3 +1,7 @@
+volumes:
+  sock:
+    driver: local
+
 services:
   proxy:
     build:
@@ -9,6 +13,7 @@ services:
     environment:
       - BACKENDS=http://api-1:8080,http://api-2:8080
       - PORT=9999
+      - UNIX_SOCKET_DIR=/run/sock
     depends_on:
       api-1:
         condition: service_started
@@ -16,6 +21,8 @@ services:
         condition: service_started
     networks:
       - rinha-net
+    volumes:
+      - sock:/run/sock
     deploy:
       resources:
         limits:
@@ -30,8 +37,11 @@ services:
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
+      - UNIX_SOCKET_DIR=/run/sock
     networks:
       - rinha-net
+    volumes:
+      - sock:/run/sock
     deploy:
       resources:
         limits:
@@ -46,8 +56,11 @@ services:
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
+      - UNIX_SOCKET_DIR=/run/sock
     networks:
       - rinha-net
+    volumes:
+      - sock:/run/sock
     deploy:
       resources:
         limits:

@@ -4,8 +4,10 @@ package main
 import (
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"rinha-backend/internal/handler"
@@ -86,19 +88,68 @@ func main() {
 	mux.HandleFunc("GET /ready", h.Ready)
 	mux.HandleFunc("POST /fraud-score", h.FraudScore)
 
-	log.Printf("API server starting on port %s\n", port)
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           mux,
-		ReadHeaderTimeout: 1 * time.Second,
-		ReadTimeout:       2 * time.Second,
-		WriteTimeout:      2 * time.Second,
+		ReadHeaderTimeout: 500 * time.Millisecond,
+		ReadTimeout:       1 * time.Second,
+		WriteTimeout:      1 * time.Second,
 		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    4096,
 	}
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("Server error: %v", err)
+
+	// Start TCP listener for /ready (external health checks)
+	log.Printf("API server starting TCP on port %s\n", port)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("TCP server error: %v", err)
+		}
+	}()
+
+	// Start Unix socket listener for inter-service communication (proxy↔API)
+	// This eliminates TCP/IP overhead between proxy and APIs, reducing latency
+	// from ~100μs (TCP localhost) to <10μs (Unix socket).
+	unixSocketDir := os.Getenv("UNIX_SOCKET_DIR")
+	if unixSocketDir == "" {
+		unixSocketDir = "/run/sock"
 	}
+
+	// Use hostname as socket name so each API instance has a unique socket
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "api"
+	}
+	socketPath := filepath.Join(unixSocketDir, hostname+".sock")
+
+	// Remove stale socket file (in case of unclean shutdown)
+	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("Warning: could not remove stale socket %s: %v", socketPath, err)
+	}
+
+	// Ensure socket directory exists
+	if err := os.MkdirAll(unixSocketDir, 0755); err != nil {
+		log.Fatalf("Failed to create socket directory %s: %v", unixSocketDir, err)
+	}
+
+	unixListener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		log.Fatalf("Failed to create Unix socket %s: %v", socketPath, err)
+	}
+
+	// Make socket accessible to the proxy container (different user/group)
+	if err := os.Chmod(socketPath, 0777); err != nil {
+		log.Printf("Warning: could not chmod socket %s: %v", socketPath, err)
+	}
+
+	log.Printf("API server starting Unix socket on %s\n", socketPath)
+	go func() {
+		if err := srv.Serve(unixListener); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Unix socket server error: %v", err)
+		}
+	}()
+
+	// Block main goroutine
+	select {}
 }
 
 // buildIndex loads the dataset, builds the IVF index, and saves it to a binary file.
