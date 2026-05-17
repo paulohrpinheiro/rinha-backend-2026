@@ -3,13 +3,186 @@ package loader
 
 import (
 	"compress/gzip"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"math/rand/v2"
 	"os"
+	"unsafe"
 
 	"rinha-backend/internal/model"
 	"rinha-backend/internal/vector"
 )
+
+// Binary format for the pre-built IVF index:
+//
+//	Magic      [4]byte   "IVF\x01" (magic + version)
+//	NumVectors  uint32   little-endian
+//	NumCentroids uint32  little-endian
+//	Vectors     []byte   numVectors * 14 bytes (int8)
+//	Labels      []byte   numVectors bytes (uint8)
+//	Centroids   []byte   numCentroids * 14 bytes (int8)
+//	Offsets     []byte   (numCentroids + 1) * 4 bytes (int32 LE)
+const indexMagic = "IVF\x01"
+
+// IndexData holds a deserialized pre-built index.
+type IndexData struct {
+	Vectors   []vector.Vector14
+	Labels    []uint8
+	Centroids []vector.Vector14
+	Offsets   []int
+}
+
+// SaveIndex serializes the IVF index components to a binary file.
+func SaveIndex(path string, vectors []vector.Vector14, labels []uint8, centroids []vector.Vector14, offsets []int) error {
+	nVectors := uint32(len(vectors))
+	nCentroids := uint32(len(centroids))
+
+	if nVectors == 0 || nCentroids == 0 {
+		return errors.New("empty vectors or centroids")
+	}
+	if len(labels) != int(nVectors) {
+		return errors.New("labels length mismatch")
+	}
+	if len(offsets) != int(nCentroids)+1 {
+		return errors.New("offsets length mismatch")
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// 1. Write magic header
+	if _, err := f.Write([]byte(indexMagic)); err != nil {
+		return err
+	}
+
+	// 2. Write metadata
+	var buf [8]byte
+	binary.LittleEndian.PutUint32(buf[0:4], nVectors)
+	binary.LittleEndian.PutUint32(buf[4:8], nCentroids)
+	if _, err := f.Write(buf[:]); err != nil {
+		return err
+	}
+
+	// 3. Write vectors (nVectors * 14 bytes)
+	vecLen := int(nVectors) * 14
+	vecBytes := make([]byte, vecLen)
+	for i, v := range vectors {
+		off := i * 14
+		for d := 0; d < 14; d++ {
+			vecBytes[off+d] = byte(v[d])
+		}
+	}
+	if _, err := f.Write(vecBytes); err != nil {
+		return err
+	}
+
+	// 4. Write labels (nVectors bytes)
+	if _, err := f.Write(labels); err != nil {
+		return err
+	}
+
+	// 5. Write centroids (nCentroids * 14 bytes)
+	centLen := int(nCentroids) * 14
+	centBytes := make([]byte, centLen)
+	for i, c := range centroids {
+		off := i * 14
+		for d := 0; d < 14; d++ {
+			centBytes[off+d] = byte(c[d])
+		}
+	}
+	if _, err := f.Write(centBytes); err != nil {
+		return err
+	}
+
+	// 6. Write offsets ((nCentroids+1) * 4 bytes as int32)
+	offLen := (int(nCentroids) + 1) * 4
+	offBytes := make([]byte, offLen)
+	for i, o := range offsets {
+		binary.LittleEndian.PutUint32(offBytes[i*4:(i+1)*4], uint32(o))
+	}
+	if _, err := f.Write(offBytes); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// LoadIndex deserializes a pre-built IVF index from a binary file.
+func LoadIndex(path string) (*IndexData, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(data) < 12 {
+		return nil, errors.New("index file too small")
+	}
+
+	if string(data[:4]) != indexMagic {
+		return nil, errors.New("invalid index magic or version")
+	}
+
+	nVectors := binary.LittleEndian.Uint32(data[4:8])
+	nCentroids := binary.LittleEndian.Uint32(data[8:12])
+
+	if nVectors == 0 || nCentroids == 0 {
+		return nil, errors.New("empty index data")
+	}
+
+	vecOffset := 12
+	vecLen := int(nVectors) * 14
+	labelsOffset := vecOffset + vecLen
+	labelsLen := int(nVectors)
+	centOffset := labelsOffset + labelsLen
+	centLen := int(nCentroids) * 14
+	offOffset := centOffset + centLen
+	offLen := (int(nCentroids) + 1) * 4
+
+	if len(data) < offOffset+offLen {
+		return nil, errors.New("index file truncated")
+	}
+
+	// Read vectors — convert byte slice to int8 vectors
+	vecSlice := data[vecOffset : vecOffset+vecLen]
+	vectors := make([]vector.Vector14, nVectors)
+	for i := range vectors {
+		off := i * 14
+		// Use unsafe to cast byte slice to int8 array pointer, then copy
+		src := unsafe.Slice((*int8)(unsafe.Pointer(&vecSlice[off])), 14)
+		copy(vectors[i][:], src)
+	}
+
+	// Read labels
+	labels := make([]uint8, labelsLen)
+	copy(labels, data[labelsOffset:labelsOffset+labelsLen])
+
+	// Read centroids
+	centSlice := data[centOffset : centOffset+centLen]
+	centroids := make([]vector.Vector14, nCentroids)
+	for i := range centroids {
+		off := i * 14
+		src := unsafe.Slice((*int8)(unsafe.Pointer(&centSlice[off])), 14)
+		copy(centroids[i][:], src)
+	}
+
+	// Read offsets
+	offSlice := data[offOffset : offOffset+offLen]
+	offsets := make([]int, nCentroids+1)
+	for i := range offsets {
+		offsets[i] = int(binary.LittleEndian.Uint32(offSlice[i*4 : (i+1)*4]))
+	}
+
+	return &IndexData{
+		Vectors:   vectors,
+		Labels:    labels,
+		Centroids: centroids,
+		Offsets:   offsets,
+	}, nil
+}
 
 // Reference is a single entry from references.json.gz.
 type Reference struct {

@@ -32,7 +32,7 @@ Verificação de prontidão. O **proxy** consulta o `/ready` de cada backend (ap
 | Todos respondem 2xx | **HTTP 200** `{"status":"ok","backends":[...]}` |
 | Algum falha | **HTTP 503** `{"status":"degraded","backends":[...]}` |
 
-Isoladamente, cada API também expõe `GET /ready` na porta 8080, respondendo 200 apenas após carregar todo o dataset e construir o índice IVF.
+Isoladamente, cada API também expõe `GET /ready` na porta 8080, respondendo 200 assim que o índice IVF pré-construído é carregado (menos de 1 segundo).
 
 ### `POST /fraud-score`
 
@@ -51,7 +51,7 @@ internal/
   vector/normalize.go  # Vetor 14-dim + quantização int8 + Manhattan
   index/index.go       # IVF Index (Inverted File Index)
   handler/fraud.go     # Handlers HTTP (/ready, /fraud-score)
-  loader/loader.go     # Carregamento streaming do dataset + clustering IVF
+  loader/loader.go     # Carregamento streaming + clustering IVF + serialização binária do índice
   *_test.go            # Testes unitários e benchmarks
 docs/
   DECISOES.md          # Decisões arquiteturais (contexto para IA)
@@ -62,10 +62,11 @@ docs/
   BUSCA_VETORIAL.md    # Introdução à busca vetorial
   DATASET.md           # Formato dos arquivos de referência
   SUBMISSAO.md         # Passo a passo da submissão
-resources/             # Dataset (copiado no build Docker)
-  references.json.gz   # 3M vetores rotulados
+resources/             # Dataset + índice pré-construído
+  references.json.gz   # 3M vetores rotulados (apenas para build)
   mcc_risk.json        # Risco por MCC
   normalization.json   # Constantes de normalização
+  index.bin            # Índice IVF pré-construído (gerado no docker build)
 Dockerfile.api         # Multi-stage: golang -> scratch
 Dockerfile.proxy       # Multi-stage: golang -> scratch
 docker-compose.yml     # Orquestração local (com build)
@@ -80,12 +81,17 @@ README.md              # Este arquivo
 
 ## Como Funciona
 
-### 1. Startup (pré-carregamento)
-No startup, a API carrega os 3M vetores de `references.json.gz` em **modo streaming** (um
-`Reference` por vez) para evitar estourar o limite de memória de 165MB. Cada vetor de 14
-float64 é imediatamente quantizado para int8 e descartado. Em seguida, constrói o índice
-IVF com K-means (5 iterações em mini-batches). O servidor HTTP só começa a responder após
-o índice estar pronto.
+### 1. Startup (índice pré-construído)
+
+No **Docker build**, a API carrega os 3M vetores de `references.json.gz` em modo streaming,
+constrói o índice IVF com K-means (5 iterações em mini-batches) e serializa o resultado em
+`/resources/index.bin` (formato binário, ~45MB).
+
+No **startup do container**, a API apenas lê o `index.bin` do disco — leva **menos de 1 segundo**.
+O servidor HTTP começa a responder `GET /ready` com 200 imediatamente.
+
+Em desenvolvimento local (sem Docker), a API faz o carregamento completo do `references.json.gz`
+como fallback.
 
 ### 2. Recebimento
 `POST /fraud-score` recebe JSON com dados da transação.
@@ -158,10 +164,13 @@ Baixe do [repositório oficial da Rinha](https://github.com/zanfranceschi/rinha-
 ## Docker
 
 Multi-stage build com scratch:
-- Dockerfile.api: binário API (~5 MB) + dataset
+- Dockerfile.api: binário API (~5 MB) + dataset + índice IVF pré-construído (~45 MB)
 - Dockerfile.proxy: binário Proxy (~3 MB)
 
-Imagens finais: ~10-15 MB, sem shell ou libc.
+Imagens finais: ~51 MB (API), ~3 MB (proxy), sem shell ou libc.
+
+### Índice pré-construído
+Durante o Docker build, a API executa `api -build-index /resources/index.bin` para gerar o índice IVF a partir do `references.json.gz`. Esse índice binário é copiado para a imagem final, eliminando o processamento de startup (~90s → <1s). Se o `index.bin` não existir (desenvolvimento local sem Docker), o carregamento completo do JSON é usado como fallback.
 
 ### Publicação no Docker Hub
 
@@ -223,12 +232,13 @@ Documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)** — arquivo de contex
 | 05 | Stripped binaries | -ldflags="-s -w" -trimpath — 60% menor |
 | 06 | Docker scratch | Imagem ~10 MB, sem shell/libc |
 | 07 | Orphan branch | submission sem histórico com main |
-| 08 | Pré-carregamento | Startup lento, zero CPU durante teste |
+| 08 | Índice pré-construído | Startup <1s (index.bin gerado no Docker build) |
 | 09 | 350 MB total | Proxy 20MB + 2xAPI 165MB |
 | 10 | Só stdlib | Nenhuma dependência externa |
 | 11 | Proxy serve /ready | Evita 502 enquanto APIs carregam |
 | 12 | Imagens versionadas | Tag fixa evita cache no test runner |
-| 13 | Streaming JSON loading | Evita OOM durante startup (114MB pico vs 165MB limite) |
+| 13 | Streaming JSON loading | Evita OOM durante build do índice (114MB pico vs 165MB limite) |
+| 14 | IVF index binário | Serialização/deserialização direta em disco (~45MB) |
 
 ---
 

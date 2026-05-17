@@ -87,13 +87,19 @@ O handler `/ready` no proxy:
 
 ---
 
-## ADR-06: Docker multi-stage build com scratch
+## ADR-06: Docker multi-stage build com scratch + índice pré-construído
 
 **Decisão**:
-1. Stage 1: golang:1.26.3-alpine para compilar
-2. Stage 2: scratch (apenas binário + dados de referência)
+1. Stage 1 (builder): golang:1.26.3-alpine para compilar + gerar índice IVF pré-construído
+2. Stage 2 (runtime): scratch (apenas binário + índice binário + dados de referência)
 
-**Consequências**: Imagem final ~10-15 MB comprimida, sem shell ou libc.
+No builder, após compilar o binário, executa-se:
+```dockerfile
+RUN RESOURCES_DIR=/resources /api -build-index /resources/index.bin
+```
+Isso serializa o IVF index em formato binário (~45MB), eliminando o processamento de startup.
+
+**Consequências**: Imagem final ~51 MB (API), sem shell ou libc. Startup < 1s.
 
 ---
 
@@ -124,22 +130,34 @@ O repositório precisa ter ao menos **um commit** antes de criar a orphan branch
 
 ---
 
-## ADR-08: Startup lento com dados pré-carregados
+## ADR-08: Índice IVF pré-construído no Docker build
 
 **Contexto**: O servidor HTTP da API deve responder apenas quando todos os dados estiverem
-carregados e o índice IVF estiver pronto para consultas.
+carregados e o índice IVF estiver pronto para consultas. Originalmente, todo o processamento
+(carregamento streaming de 3M vetores + K-means + full assignment) ocorria no startup de cada
+container, levando ~90s. O test runner faz até 30 tentativas de `GET /ready` (~3s cada),
+totalizando ~90s — o startup estourava essas tentativas.
 
-**Decisão**: No startup de cada API:
-1. Carregar normalization.json e mcc_risk.json
-2. Decompress + parse de references.json.gz
-3. Executar K-means para construir IVF index
-4. Só então iniciar o servidor HTTP e responder 200 em GET /ready
+**Decisão**: O índice IVF é construído **uma única vez durante o Docker build** e serializado
+em formato binário (`index.bin`, ~45MB). No startup de cada API:
 
-**Consequências**: Startup mais lento (~5-15s), zero processamento durante o teste.
+1. Carregar normalization.json e mcc_risk.json (< 1ms)
+2. Ler `index.bin` do disco e reconstruir o índice IVF (~200ms)
+3. Iniciar o servidor HTTP e responder 200 em `GET /ready`
 
-**Nota**: O endpoint `GET /ready` na porta 9999 (proxy) é independente — o proxy o serve
-localmente e verifica a saúde dos backends. Ou seja, o `/ready` público nunca fica
-indisponível por 502, mesmo durante o startup das APIs.
+No Dockerfile, isso é feito com:
+```dockerfile
+RUN RESOURCES_DIR=/resources /api -build-index /resources/index.bin
+```
+
+O código oferece fallback: se `index.bin` não existir (ex: desenvolvimento local sem Docker),
+o carregamento completo do `references.json.gz` é usado.
+
+**Consequências**:
+- Startup caiu de **~90s para < 1s** (~100x mais rápido).
+- O Docker build ficou ~70s mais lento (acontece uma vez por versão).
+- Imagem final ~4 MB maior (devido ao `index.bin`).
+- Código existente permanece funcional (fallback preservado).
 
 ---
 
@@ -152,13 +170,14 @@ indisponível por 502, mesmo durante o startup das APIs.
 | api-2   | 0.475| 165 MB  |
 | Total   | 1.0  | 350 MB  |
 
+
 ---
 
 ## ADR-10: Uso exclusivo da standard library
 
 **Decisão**: Nenhuma dependência externa.
 
-Pacotes: net/http, encoding/json, compress/gzip, math/rand/v2, slices, cmp, sync/atomic, net/http/httputil.
+Pacotes: net/http, encoding/json, compress/gzip, math/rand/v2, slices, cmp, sync/atomic, net/http/httputil, encoding/binary, unsafe.
 
 **Consequências**: go.mod com apenas module e go 1.26. Build reprodutível.
 
@@ -245,9 +264,39 @@ elementos = 24MB) por `make([]int, batchSize)` + `rng.IntN(n)`, alocando apenas 
 
 **Consequências**:
 - Resolve o OOM killer — pico de 114MB dentro do limite de 165MB.
-- Startup ~5s mais lento devido ao streaming (I/O sequencial vs bulk decode).
+- O streaming agora ocorre **durante o Docker build** (não no startup runtime), então o impacto no runtime é zero.
 - Nenhuma alocação extra no runtime: após o startup, a API opera com ~47MB fixos.
 - `json.NewDecoder` em modo streaming é tão rápido quanto bulk para arquivos grandes.
+
+---
+
+## ADR-14: Índice IVF em formato binário para startup instantâneo
+
+**Contexto**: O índice IVF construído no Docker build precisa ser salvo em disco e recarregado
+no startup do container. O formato precisa ser eficiente para leitura e minimalista em tamanho.
+
+**Decisão**: Serializar o IVF index em formato binário customizado com:
+
+| Campo | Tipo | Tamanho |
+|-------|------|:-------:|
+| Magic + versão | `[4]byte` ("IVF\x01") | 4 B |
+| Nº de vetores | `uint32` LE | 4 B |
+| Nº de centroides | `uint32` LE | 4 B |
+| Vetores | `[]int8` (nVet × 14) | nVet × 14 B |
+| Labels | `[]uint8` (nVet) | nVet B |
+| Centroides | `[]int8` (nCent × 14) | nCent × 14 B |
+| Offsets | `[]int32` LE (nCent+1) | (nCent+1) × 4 B |
+
+Para 3M vetores e 1000 centroides: ~45MB totais (42MB vetores + 3MB labels + 14KB centroides + 4KB offsets).
+
+A função `SaveIndex()` serializa os slices diretamente; `LoadIndex()` faz o caminho inverso
+usando `unsafe` para conversão eficiente entre `[]byte` e `[]int8`.
+
+**Consequências**:
+- Startup **< 1s** vs ~90s anteriores (~100x mais rápido).
+- Imagem Docker ~4 MB maior (45 MB do índice vs 41 MB do JSON comprimido? não, o JSON gzipado tem 48MB, mas o índice binário tem 45MB — diferença marginal).
+- Fallback preservado: se `index.bin` não existir, carrega do `references.json.gz`.
+- `unsafe` usado apenas na leitura, com escopo limitado ao loader e sem impacto na segurança do runtime.
 
 ---
 
