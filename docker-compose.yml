@@ -1,35 +1,11 @@
-x-config:
-  res-dir: &res-dir "/resources"
-
-x-api-base: &api-template
-  image: paulohrpinheiro/rinha-api:v1
-  # Mudando para formato de objeto, o Docker aceita a âncora pura
-  environment:
-    PORT: 8080
-    RESOURCES_DIR: *res-dir
-  volumes:
-    - type: bind
-      source: ./resources
-      target: *res-dir
-      read_only: true
-      bind:
-        selinux: z
-  networks:
-    - rinha-net
-  deploy:
-    resources:
-      limits:
-        cpus: "0.475"
-        memory: "165MB"
-
 services:
   proxy:
-    image: paulohrpinheiro/rinha-proxy:v1
+    image: paulohrpinheiro/rinha-proxy:v4
     ports:
       - "9999:9999"
     environment:
-      BACKENDS: "http://api-1:8080,http://api-2:8080"
-      PORT: 9999
+      - BACKENDS=http://api-1:8080,http://api-2:8080
+      - PORT=9999
     depends_on:
       api-1:
         condition: service_started
@@ -44,12 +20,31 @@ services:
           memory: "20MB"
 
   api-1:
-    <<: *api-template
+    image: paulohrpinheiro/rinha-api:v4
+    environment:
+      - PORT=8080
+      - RESOURCES_DIR=/resources
+    networks:
+      - rinha-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.475"
+          memory: "165MB"
 
   api-2:
-    <<: *api-template
+    image: paulohrpinheiro/rinha-api:v4
+    environment:
+      - PORT=8080
+      - RESOURCES_DIR=/resources
+    networks:
+      - rinha-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.475"
+          memory: "165MB"
 
 networks:
   rinha-net:
     driver: bridge
-
