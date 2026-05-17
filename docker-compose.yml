@@ -1,6 +1,6 @@
 services:
   proxy:
-    image: paulohrpinheiro/rinha-proxy:v4
+    image: paulohrpinheiro/rinha-proxy:v5
     ports:
       - "9999:9999"
     environment:
@@ -20,7 +20,7 @@ services:
           memory: "20MB"
 
   api-1:
-    image: paulohrpinheiro/rinha-api:v4
+    image: paulohrpinheiro/rinha-api:v5
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
@@ -33,7 +33,7 @@ services:
           memory: "165MB"
 
   api-2:
-    image: paulohrpinheiro/rinha-api:v4
+    image: paulohrpinheiro/rinha-api:v5
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
