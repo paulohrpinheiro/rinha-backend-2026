@@ -27,6 +27,7 @@ services:
           memory: "20MB"
 
   api-1:
+    hostname: api-1
     image: paulohrpinheiro/rinha-api:v2
     environment:
       - PORT=8080
@@ -43,6 +44,7 @@ services:
           memory: "165MB"
 
   api-2:
+    hostname: api-2
     image: paulohrpinheiro/rinha-api:v2
     environment:
       - PORT=8080

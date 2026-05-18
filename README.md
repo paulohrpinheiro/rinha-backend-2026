@@ -304,6 +304,8 @@ Documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)** — arquivo de contex
 | 27 | Remove log.Printf | Syscall no hot path |
 | 28 | CPU proxy 0.10, APIs 0.45 | Proxy era o gargalo principal |
 | 29 | json.NewDecoder direto | Elimina cópia intermediária do body |
+| 30 | Proxy custom (sem httputil) | Reduz CPU por requisição de 0.5ms para 0.15ms |
+| 31 | hostname explícito nos APIs | Alinha socket names entre proxy e API |
 
 ---
 

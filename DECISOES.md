@@ -967,6 +967,61 @@ eliminando a criação de um cliente HTTP separado por chamada de `/ready`.
 
 ---
 
+## ADR-31: hostname explícito nos containers da API (Unix socket naming)
+
+**Contexto**: A comunicação entre proxy e API usa Unix sockets para eliminar overhead
+de TCP/IP. A API cria o socket com o nome do hostname do container
+(`os.Hostname() + ".sock"`), e o proxy extrai o hostname da URL do backend
+(`net.SplitHostPort("api-1:8080") → "api-1"`) para construir o caminho do socket.
+
+Em Docker Compose, o hostname padrão de um container **é o container ID** (ex:
+`a1b2c3d4e5f6`), **não** o nome do serviço (`api-1`). Isso significa que:
+
+- API cria socket em `/run/sock/a1b2c3d4e5f6.sock`
+- Proxy procura por `/run/sock/api-1.sock`
+- **Os nomes nunca coincidem** → toda conexão via Unix socket falha
+
+**Sintoma**: `curl localhost:9999/ready` retorna `{"status":"degraded"}` com
+status `"unreachable: dial unix /run/sock/api-1.sock: connect: no such file or directory"`.
+O proxy também responde 502 ("backend error") para todas as requisições
+`POST /fraud-score` porque o `http.Client.Do` falha ao conectar no socket
+inexistente.
+
+**Decisão**: Adicionar `hostname: api-1` e `hostname: api-2` nos serviços
+`api-1` e `api-2` do docker-compose.yml:
+
+```yaml
+api-1:
+    hostname: api-1
+    ...
+
+api-2:
+    hostname: api-2
+    ...
+```
+
+Isso garante que `os.Hostname()` retorne exatamente o mesmo valor que o
+proxy extrai da URL do backend, alinhando a nomenclatura dos sockets.
+
+**Alternativas consideradas**:
+1. **Variável de ambiente** (`SOCKET_NAME=api-1`) — mais explícito, mas adiciona
+   uma variável que precisa ser sincronizada entre API e proxy. Mais frágil.
+2. **Socket name fixo** (`/run/sock/api.sock`) — não funciona com 2 instâncias
+   de API no mesmo volume compartilhado.
+3. **Resolver DNS reverso** — complexidade desnecessária para um problema de
+   configuração.
+
+**Arquivos alterados**: docker-compose.yml, docker-compose.submission.yml.
+
+**Consequências**:
+- Socket names de API e proxy alinhados → comunicação Unix socket funcional.
+- O container ID continua disponível via `/etc/hostname` e `HOSTNAME` env var,
+  mas `os.Hostname()` agora retorna o valor configurado.
+- Nenhuma alteração no código Go — apenas configuração do Docker Compose.
+- A mesma correção deve ser replicada no `docker-compose.submission.yml`.
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões

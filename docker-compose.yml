@@ -30,6 +30,7 @@ services:
           memory: "20MB"
 
   api-1:
+    hostname: api-1
     build:
       context: .
       dockerfile: Dockerfile.api
@@ -49,6 +50,7 @@ services:
           memory: "165MB"
 
   api-2:
+    hostname: api-2
     build:
       context: .
       dockerfile: Dockerfile.api
