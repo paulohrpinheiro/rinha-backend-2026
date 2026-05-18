@@ -3,7 +3,6 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 	"strconv"
 	"sync"
@@ -15,19 +14,11 @@ import (
 
 // semaphore limits concurrent fraud-score requests to prevent
 // goroutine explosion and GC thrashing under high load.
-// 32 is appropriate for 0.475 CPU: 32 concurrent × ~0.3ms = ~9.6ms
+// 32 is appropriate for 0.45 CPU: 32 concurrent × ~0.3ms = ~9.6ms
 // of simultaneous CPU work, safely within the CPU budget.
 // More conservative than the previous 128, reducing GC pressure
 // and Go scheduler contention significantly.
 var semaphore = make(chan struct{}, 32)
-
-// bodyBufferPool reuses bytes.Buffer for reading request bodies
-// to reduce allocation churn under high load.
-var bodyBufferPool = sync.Pool{
-	New: func() any {
-		return new(bytes.Buffer)
-	},
-}
 
 // payloadPool reuses TransactionPayload structs to reduce one allocation
 // per request. (json.Unmarshal still allocates internal strings/slices.)
@@ -81,34 +72,21 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Read body into reusable buffer (avoids per-request []byte alloc)
-	bodyBuf := bodyBufferPool.Get().(*bytes.Buffer)
-	bodyBuf.Reset()
-	defer bodyBufferPool.Put(bodyBuf)
-
-	if _, err := io.Copy(bodyBuf, r.Body); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"cannot read body"}`))
-		return
-	}
-	bodyBytes := bodyBuf.Bytes()
-
-	// 3. Parse JSON using pooled payload struct
+	// 2. Parse JSON directly from request body (skip intermediate buffer copy)
 	payload := payloadPool.Get().(*model.TransactionPayload)
 	defer payloadPool.Put(payload)
 
-	if err := json.Unmarshal(bodyBytes, payload); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(payload); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"invalid JSON"}`))
 		return
 	}
 
-	// 4. Normalize to 14-dim vector
+	// 3. Normalize to 14-dim vector
 	queryVec := vector.Normalize(payload, h.norm, h.mccRisk)
 
-	// 5. Search for 5 nearest neighbors
+	// 4. Search for 5 nearest neighbors
 	fraudCount, err := h.index.Search(&queryVec)
 	if err != nil {
 		// Silent fallback — no log.Printf (avoids syscall in hot path)
@@ -118,11 +96,11 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 6. Calculate fraud score and decision
+	// 5. Calculate fraud score and decision
 	fraudScore := float64(fraudCount) / 5.0
 	approved := fraudScore < 0.6
 
-	// 7. Serialize response manually (no reflection, no json.Encoder)
+	// 6. Serialize response manually (no reflection, no json.Encoder)
 	buf := responsePool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer responsePool.Put(buf)

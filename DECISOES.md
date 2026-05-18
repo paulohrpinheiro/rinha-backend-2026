@@ -1,6 +1,6 @@
 # Decisões Arquiteturais — Rinha de Backend 2026
 
-> Data: 2026-05-16
+> Data: 2026-05-18
 > Stack: Go 1.26.3
 
 ---
@@ -165,11 +165,13 @@ o carregamento completo do `references.json.gz` é usado.
 
 | Serviço | CPU  | Memória |
 |---------|:----:|:-------:|
-| proxy   | 0.05 | 20 MB   |
-| api-1   | 0.475| 165 MB  |
-| api-2   | 0.475| 165 MB  |
+| proxy   | 0.10 | 20 MB   |
+| api-1   | 0.45 | 165 MB  |
+| api-2   | 0.45 | 165 MB  |
 | Total   | 1.0  | 350 MB  |
 
+> **Nota**: A distribuição original (proxy 0.05, APIs 0.475) foi alterada no ADR-28
+> após evidências de que o proxy era o gargalo principal.
 
 ---
 
@@ -329,7 +331,7 @@ A causa raiz foi identificada como:
 1. **Ausência de timeouts** → conexões acumulam, centenas de goroutines concorrentes
    pressionam o GC e consomem CPU em barriers de memória em vez de processar requisições.
 2. **Sem limitador de concorrência** → uma rajada de requisições spawna goroutines
-   ilimitadas, causando thrashing no GC sob 0.475 CPU.
+   ilimitadas, causando thrashing no GC sob 0.45 CPU.
 3. **Transport do proxy sem tuning** → conexões HTTP para os backends não eram
    reutilizadas eficientemente, e podiam ficar em TIME_WAIT.
 
@@ -379,7 +381,7 @@ proxy.Transport = &http.Transport{
 
 ## ADR-16: Limitador de concorrência (semáforo) na API
 
-**Contexto**: Com 0.475 CPU por API e 165MB de RAM, processar centenas de
+**Contexto**: Com 0.45 CPU por API e 165MB de RAM, processar centenas de
 requisições simultâneas cria pressão insustentável no GC. Cada requisição aloca
 memória para parse do JSON (payload da transação com ~300 bytes), vetor
 temporário e resultados da busca. Sob carga alta, o GC dispara repetidamente,
@@ -413,7 +415,7 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 **Parâmetros**: O limite de 64 concorrentes foi escolhido porque:
 - Cada requisição leva ~0.5ms de CPU para processar (normalização + busca IVF)
 - 64 concorrentes × 0.5ms = 32ms de CPU simultânea
-- Com 0.475 CPU, 32ms de trabalho simultâneo é viável sem sobrecarregar o GC
+- Com 0.45 CPU, 32ms de trabalho simultâneo é viável sem sobrecarregar o GC
 - 64 buffers de payload (~300 bytes cada) = ~19KB adicionais na heap — irrelevante
 
 **Alternativa considerada**: Usar `rate.Limiter` do `golang.org/x/time/rate`.
@@ -430,8 +432,6 @@ stdlib puro.
 - A taxa de falhas sobe um pouco (503s entram em `Err`), mas o volume de 503s
   tende a ser baixo se o limite for calibrado corretamente — muito menor que os
   73% de timeouts observados.
-
----
 
 ---
 
@@ -516,7 +516,7 @@ var semaphore = make(chan struct{}, 128)
 **Cálculo**:
 - Tempo médio por requisição com Unix socket: ~0.3ms
 - 128 concorrentes × 0.3ms = ~38ms de CPU simultânea
-- Com 0.475 CPU, 38ms de trabalho é viável sem thrashing do GC
+- Com 0.45 CPU, 38ms de trabalho é viável sem thrashing do GC
 - A folga adicional de 2× em relação ao original acomoda picos sem responder 503
 
 **Consequências**:
@@ -601,7 +601,7 @@ com **13.973 erros HTTP** e **100% de falha** — score final **−6000**.
 | Erros HTTP | 13.973 | **0** |
 | Score | −6000 | **+6000** |
 
-128 goroutines concorrentes em 0.475 CPU criam contenção excessiva no Go scheduler e no GC.
+128 goroutines concorrentes em 0.45 CPU criam contenção excessiva no Go scheduler e no GC.
 O tempo de CPU por requisição é dominado pelo parsing JSON (reflection) e pela busca vetorial
 (~14μs), não pela comunicação. Com 128 goroutines, o scheduler alterna freneticamente e o GC
 dispara com frequência.
@@ -615,7 +615,7 @@ var semaphore = make(chan struct{}, 32)
 **Cálculo**:
 - Tempo médio por requisição com parsing otimizado: ~0.3ms
 - 32 concorrentes × 0.3ms = ~9.6ms de CPU simultânea
-- Com 0.475 CPU, 9.6ms de trabalho é conservador — GC tem folga para coletar sem afetar vazão
+- Com 0.45 CPU, 9.6ms de trabalho é conservador — GC tem folga para coletar sem afetar vazão
 - 32 conexões TCP simultâneas também é o threshold típico para evitar TIME_WAIT
   e esgotamento de portas efêmeras em sistemas Linux padrão
 
@@ -700,7 +700,7 @@ buf.WriteByte('}')
 O valor default é o número de CPUs físicas do **host** (obtido via `runtime.NumCPU()`),
 não a cota do container. Em um host com 16+ CPUs, `GOMAXPROCS` default = 16+ threads.
 
-Com cota de 0.475 CPU no container, ter 16+ threads significa que a maioria fica parada
+Com cota de 0.45 CPU no container, ter 16+ threads significa que a maioria fica parada
 (limitada pelo cgroups), mas o Go scheduler ainda cria overhead de gerenciamento:
 goroutines são migradas entre threads, o cache L1/L2 sofre, e o syscall `sched_yield`
 é chamado com frequência.
@@ -712,7 +712,7 @@ runtime.GOMAXPROCS(1)
 ```
 
 **Consequências**:
-- Apenas 1 thread de OS executa goroutines — ideal para 0.475 CPU.
+- Apenas 1 thread de OS executa goroutines — ideal para 0.45 CPU.
 - Elimina contenção de cache e migração de goroutines entre threads.
 - O Go scheduler opera com um único P (processor context), simplificando o escalonamento.
 - A vazão máxima teórica é limitada a 1 thread, mas como a cota é < 1 CPU, não há perda.
@@ -820,6 +820,150 @@ if err != nil {
 - Elimina syscall `write(2, ...)` no hot path, que pode causar contenção no FD do stderr.
 - Perda de visibilidade de erros de busca (que são extremamente raros).
 - Se necessário, logs podem ser reativados com log condicional em nível de debug.
+
+---
+
+## ADR-28: Redistribuição de CPU — proxy 0.10, APIs 0.45
+
+**Contexto**: Com 0.05 CPU, o proxy usando `httputil.ReverseProxy` não sustentava o
+fluxo de 54.100 requisições em 5 minutos (~180 req/s). Cada requisição no proxy
+consome ~0.5ms de CPU (clonagem de request, cópia de headers, body, ida e volta
+ao backend), resultando num throughput máximo teórico de ~100 req/s — insuficiente.
+
+Evidência: todos os testes oficiais (v9, v10 e anteriores) mostravam 100% de
+failure rate com p99 no exato timeout do k6 (2002ms), indicando que a maioria
+das requisições nem chegava a ser processada pela API. A API, com semáforo 32
+e busca vetorial em ~56μs, tinha capacidade ociosa.
+
+O melhor competidor (MXLange/c-api-rinha2026, C com Unix sockets) aloca
+**0.10 CPU para o load balancer** e obtém p99 de 0.98ms com zero erros.
+
+**Decisão**: Redistribuir o orçamento total de 1.0 CPU:
+
+| Serviço | Antes | Depois |
+|---------|:-----:|:------:|
+| proxy   | 0.05  | **0.10** |
+| api-1   | 0.475 | **0.45** |
+| api-2   | 0.475 | **0.45** |
+| Total   | 1.0   | 1.0    |
+
+**Cálculo**: com 0.10 CPU (100ms/s) e ~0.3ms por requisição no proxy (com
+Unix socket, body pequeno, headers mínimos), o throughput máximo teórico
+sobe para ~330 req/s — acima dos 180 req/s médios do teste.
+
+O orçamento total de 1.0 CPU e 350 MB permanece inalterado.
+
+**Arquivos alterados**: docker-compose.yml, docker-compose.submission.yml.
+
+**Consequências**:
+- Proxy com o dobro de CPU — pode sustentar picos de burst sem acumular fila.
+- APIs com 0.45 CPU em vez de 0.475 — perda marginal de 2.5% que não afeta
+  a busca vetorial (domina ~56μs dos ~300μs totais).
+- Total do orçamento inalterado (1.0 CPU).
+- Alinhamento com a distribuição do melhor competidor conhecido.
+
+---
+
+## ADR-29: Leitura direta do body com json.NewDecoder
+
+**Contexto**: O handler `FraudScore` usava `io.Copy(bodyBuf, r.Body)` para ler o
+body da requisição em um buffer reutilizável (`sync.Pool`), depois chamava
+`json.Unmarshal(bodyBytes, payload)`. Isso criava:
+1. Uma chamada de `io.Copy` com overhead de função
+2. Um slice `[]byte` derivado do buffer (`bodyBuf.Bytes()`)
+3. Um parser JSON que percorria os mesmos bytes novamente
+
+Cada requisição tem body de ~300 bytes — pequeno o suficiente para que o
+`json.NewDecoder` leia diretamente do `r.Body` sem overhead perceptível,
+evitando a duplicação de leitura.
+
+**Decisão**: Substituir `io.Copy + json.Unmarshal` por `json.NewDecoder(r.Body).Decode(payload)`:
+
+```go
+// Antes:
+bodyBuf := bodyBufferPool.Get().(*bytes.Buffer)
+bodyBuf.Reset()
+io.Copy(bodyBuf, r.Body)
+payload := payloadPool.Get().(*model.TransactionPayload)
+json.Unmarshal(bodyBuf.Bytes(), payload)
+
+// Depois:
+payload := payloadPool.Get().(*model.TransactionPayload)
+json.NewDecoder(r.Body).Decode(payload)
+```
+
+Também foi removido o `bodyBufferPool` (não mais usado) e o import de `"io"`.
+
+**Consequências**:
+- Elimina uma cópia de dados (o `io.Copy` inteiro).
+- Remove o `bodyBufferPool` — menos código e um sync.Pool a menos.
+- `json.NewDecoder` para payloads de ~300 bytes tem desempenho comparável a
+  `json.Unmarshal`, sem a etapa intermediária de buffer.
+- Simplifica o código: menos 15 linhas e 1 variável global.
+
+## ADR-30: Proxy custom (sem httputil.ReverseProxy)
+
+**Contexto**: O proxy usava `httputil.ReverseProxy` para encaminhar requisições para
+as APIs. Apesar de funcional, o `ReverseProxy` da stdlib tem overhead considerável
+sob carga alta:
+
+1. **Clonagem completa do request** — headers, URL, body são copiados na íntegra
+2. **Múltiplas alocações** — buffers intermediários para body, slices de headers
+3. **Header copy desnecessário** — copia todos os headers da requisição original,
+   mas a API só precisa de `Content-Type`
+
+Com 0.10 CPU no proxy (ADR-28), o overhead do `ReverseProxy` reduzia o ganho
+da redistribuição. Cada requisição gastava ~0.5ms de CPU no proxy, limitando
+o throughput máximo a ~200 req/s — ainda perto do limite de 180 req/s do teste.
+
+**Decisão**: Substituir `httputil.ReverseProxy` por um proxy custom mínimo usando
+`http.Client` com `http.NewRequestWithContext` e `io.ReadAll` + `bytes.NewReader`
+para o body:
+
+```go
+func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    idx := p.counter.Add(1) % uint64(len(p.backends))
+    backend := p.backends[idx]
+
+    body, _ := io.ReadAll(r.Body)
+    targetURL := backend + r.URL.Path
+    breq, _ := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(body))
+    breq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+    breq.ContentLength = int64(len(body))
+
+    resp, _ := p.client.Do(breq)
+    defer resp.Body.Close()
+
+    for k, v := range resp.Header {
+        w.Header()[k] = v
+    }
+    w.WriteHeader(resp.StatusCode)
+    io.Copy(w, resp.Body)
+}
+```
+
+Mudanças no código:
+
+| Item | Antes | Depois |
+|:-----|:------|:-------|
+| Imports | `net/http/httputil`, `net/url` | `bytes`, `io` |
+| Transporte | `httputil.ReverseProxy` + `Transport` | `http.Client` + `Transport` |
+| Headers | Cópia completa | Só `Content-Type` |
+| Body | Buffer interno do ReverseProxy | `io.ReadAll` + `bytes.NewReader` |
+| ReadyHandler | Criava `http.Client` por requisição | Reusa `Transport` do proxy |
+
+Também foi removida a função `mustParseURL` (não mais necessária) e o
+`ReadyHandler` passou a usar o mesmo `http.Transport` com Unix socket,
+eliminando a criação de um cliente HTTP separado por chamada de `/ready`.
+
+**Consequências**:
+- Custo por requisição cai de ~0.5ms para ~0.15ms de CPU no proxy.
+- Header forwarding reduzido de N headers para 1 (Content-Type).
+- Sem dependência de `httputil` — menos código compilado no binário do proxy.
+- ReadyHandler também usa o mesmo transporte Unix socket (antes criava
+  cliente HTTP separado a cada chamada de `/ready`).
+- `http.Client.Do` com `http.Transport` configurado mantém connection
+  pooling via Unix sockets.
 
 ---
 

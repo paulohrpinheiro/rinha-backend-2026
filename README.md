@@ -14,9 +14,9 @@ Client -> Proxy -> API #1 e API #2 (round-robin)
 
 | Serviço | CPU | Memória | Função |
 |---------|:---:|:-------:|--------|
-| proxy   | 0.05 | 20 MB | Load balancer round-robin + /ready |
-| api-1   | 0.475 | 165 MB | Detecção de fraude (IVF) |
-| api-2   | 0.475 | 165 MB | Detecção de fraude (IVF) |
+| proxy   | 0.10 | 20 MB | Load balancer round-robin + /ready |
+| api-1   | 0.45 | 165 MB | Detecção de fraude (IVF) |
+| api-2   | 0.45 | 165 MB | Detecção de fraude (IVF) |
 | Total   | 1.0 | 350 MB | — |
 
 ---
@@ -81,38 +81,38 @@ README.md              # Este arquivo
 
 ## Resultados do Teste Oficial
 
-> Commit: `422a8ac` · Score final: **−6000** (pior possível)
+> Última submissão: v10 (commit `6b95df7`) · Score final: **−6000** (pior possível)
 
 ### Breakdown
 
 | Componente | Valor | Corte ativado? |
 |:-----------|:-----:|:--------------:|
-| `score_p99` | **−3000** | ✅ p99 = 2001.95ms > 2000ms |
-| `score_det` | **−3000** | ✅ failure_rate = 96.69% > 15% |
+| `score_p99` | **−3000** | ✅ p99 = 2002.25ms > 2000ms |
+| `score_det` | **−3000** | ✅ failure_rate = 100% > 15% |
 | **Final** | **−6000** | ⛔ Piso absoluto |
 
-### O que aconteceu
+### Comparativo com o melhor concorrente
 
-A qualidade de **detecção é excelente** — das 1.386 respostas que chegaram a ser processadas:
-
-| Métrica | Valor | % |
-|:--------|:-----:|:-:|
-| True Positive (fraude correta) | 587 | 42.3% |
-| True Negative (legítima correta) | 769 | 55.5% |
-| False Positive (falso alarme) | 16 | 1.2% |
-| False Negative (fraude escapou) | 14 | 1.0% |
-| **Acurácia** | **97.8%** | 🎯 |
-
-O problema não é **o quê** a API decide — é que ela **não consegue responder a tempo**.
+| Métrica | Nossos resultados (v9/v10) | Best (MXLange C) |
+|:--------|:--------------------------:|:----------------:|
+| p99 | 2002.20 − 2002.25ms | **0.98ms** |
+| Erros HTTP | 13.858 − 13.973 | **0** |
+| TP | 0 | 24.037 |
+| TN | 0 | 30.022 |
+| FP | 0 | **0** |
+| FN | 0 | **0** |
+| Failure rate | **100%** | **0%** |
+| Score final | **−6000** | **+6000** |
 
 ### Causa raiz
 
 | Problema | Evidência |
 |:---------|:----------|
-| **39.554 erros HTTP** (73% das req) | APIs não responderam dentro do timeout do k6 (2001ms) |
-| **p99 = 2001.95ms** | Exatamente no limite do timeout — requisições estouraram |
-| **Nenhum timeout HTTP configurado** | `http.ListenAndServe` sem `ReadTimeout`, `WriteTimeout`, `IdleTimeout` |
-| **Sem limitador de concorrência** | Goroutines ilimitadas sob 0.475 CPU causam thrashing no GC |
+| **Proxy com 0.05 CPU insuficiente** | httputil.ReverseProxy consome ~0.5ms/req; com 0.05 CPU, throughput máximo ~100 req/s, abaixo dos 180 req/s necessários |
+| **100% failure rate** | Nenhuma requisição processada com sucesso — todas as respostas foram erros ou timeouts |
+| **p99 = 2002ms** | Exatamente no timeout do k6 — requisições nunca chegam à API |
+
+A distribuição de CPU foi ajustada no **ADR-28** (proxy 0.05→0.10, APIs 0.475→0.45).
 
 ### Lições Aprendidas
 
@@ -123,8 +123,9 @@ O problema não é **o quê** a API decide — é que ela **não consegue respon
 | 🔄 **Tuning do proxy transport** | `MaxIdleConnsPerHost`, `IdleConnTimeout` e `DialContext.Timeout` no `http.Transport` do proxy evitam criação excessiva de conexões TCP. |
 | 📊 **503 imediato > timeout de 2s** | Responder com HTTP 503 ("too many requests") em <1ms é muito melhor que deixar a conexão aberta até o timeout do cliente. |
 | 🧪 **Testar com carga real antes** | Testes unitários não revelam problemas de concorrência. Um teste de carga com k6 (mesmo que reduzido) teria detectado o problema. |
+| 🖥️ **CPU do proxy é crítica** | Com 0.05 CPU e httputil.ReverseProxy, o proxy é o gargalo principal — não a API. |
 
-As correções propostas estão documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)** (ADR-15 e ADR-16).
+As decisões arquiteturais estão documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)**.
 
 ---
 
@@ -288,10 +289,24 @@ Documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)** — arquivo de contex
 | 12 | Imagens versionadas | Tag fixa evita cache no test runner |
 | 13 | Streaming JSON loading | Evita OOM durante build do índice (114MB pico vs 165MB limite) |
 | 14 | IVF index binário | Serialização/deserialização direta em disco (~45MB) |
+| 15 | Timeouts HTTP | Evita acúmulo de conexões lentas |
+| 16 | Semáforo de concorrência | Evita thrashing no GC |
+| 17 | Unix sockets | Elimina overhead de TCP/IP |
+| 18 | Semáforo 128 | Ajuste após Unix sockets |
+| 19 | Timeouts 500ms/1s | Redução após Unix sockets |
+| 20 | Pool de buffers | Reutilização de buffers de resposta |
+| 21 | Semáforo 32 | Redução para menos pressão no GC |
+| 22 | Pool de body + payload | Reutilização de buffers de leitura |
+| 23 | Serialização manual JSON | Sem reflection no hot path |
+| 24 | GOMAXPROCS=1 | Alinhamento com cota de container |
+| 25 | Early exit IVF | Busca em 1 cluster vs 2 |
+| 26 | Timeouts no proxy | Consistência com a API |
+| 27 | Remove log.Printf | Syscall no hot path |
+| 28 | CPU proxy 0.10, APIs 0.45 | Proxy era o gargalo principal |
+| 29 | json.NewDecoder direto | Elimina cópia intermediária do body |
 
 ---
 
 ## Licença
 
 MIT
-

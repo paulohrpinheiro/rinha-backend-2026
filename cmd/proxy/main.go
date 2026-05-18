@@ -1,36 +1,30 @@
-// Load balancer proxy that distributes requests in round-robin to API instances.
+// Load balancer proxy using direct http.Client (no httputil.ReverseProxy).
+// Distributes POST /fraud-score in round-robin to API instances via Unix sockets.
 // Serves GET /ready locally by checking health of all backends.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
 	"time"
 )
 
-// unixSocketDialer returns a net.Dialer that connects to Unix sockets
-// at /run/sock/<hostname>.sock instead of TCP. This eliminates the
-// TCP/IP overhead between proxy and API containers.
-//
-// The ReverseProxy constructs requests using the backend URL (e.g.
-// http://api-1:8080), but we override the dial to go through Unix
-// sockets. The hostname from the URL is extracted to determine the
-// correct socket file.
+// unixSocketDialer returns a dialer that connects to /run/sock/<hostname>.sock
+// instead of TCP, eliminating TCP/IP overhead between proxy and API containers.
 func unixSocketDialer(socketDir string) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	d := &net.Dialer{
 		Timeout:   2 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		// addr is like "api-1:8080" — extract hostname for socket name
 		host, _, err := net.SplitHostPort(addr)
 		if err != nil {
 			host = addr
@@ -40,26 +34,65 @@ func unixSocketDialer(socketDir string) func(ctx context.Context, network, addr 
 	}
 }
 
-// RoundRobinProxy is a simple round-robin HTTP reverse proxy.
+// RoundRobinProxy is a minimal reverse proxy without the overhead of
+// httputil.ReverseProxy. It creates a fresh backend request, copies only
+// the Content-Type header, and streams the response back.
 type RoundRobinProxy struct {
-	backends []*httputil.ReverseProxy
+	backends []string
 	counter  atomic.Uint64
+	client   *http.Client
 }
 
 func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Pick backend via round-robin
 	idx := p.counter.Add(1) % uint64(len(p.backends))
-	p.backends[idx].ServeHTTP(w, r)
+	backend := p.backends[idx]
+
+	// Read body into memory (small, ~300 bytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "cannot read body", http.StatusInternalServerError)
+		return
+	}
+
+	// Build backend URL from the base URL + request path
+	targetURL := backend + r.URL.Path
+	breq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, "cannot create request", http.StatusInternalServerError)
+		return
+	}
+
+	// Forward only the Content-Type header — the API doesn't need other headers
+	breq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+	breq.ContentLength = int64(len(body))
+
+	// Send to backend via http.Client (Unix socket transport)
+	resp, err := p.client.Do(breq)
+	if err != nil {
+		http.Error(w, "backend error", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy all response headers and body back to the client
+	for k, v := range resp.Header {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
-// BackendInfo holds metadata for a single backend instance.
+// BackendInfo holds metadata for a single backend instance used by ReadyHandler.
 type BackendInfo struct {
 	RawURL   string
 	ReadyURL string
 }
 
-// ReadyHandler handles GET /ready by checking health of all backends.
+// ReadyHandler handles GET /ready by checking /ready on each backend via Unix socket.
 type ReadyHandler struct {
 	backends []BackendInfo
+	client   *http.Client
 }
 
 // backendStatus is a JSON-serializable status for one backend.
@@ -69,13 +102,11 @@ type backendStatus struct {
 }
 
 func (h *ReadyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	client := &http.Client{Timeout: 1 * time.Second}
-
 	allOK := true
 	results := make([]backendStatus, 0, len(h.backends))
 
 	for _, b := range h.backends {
-		resp, err := client.Get(b.ReadyURL)
+		resp, err := h.client.Get(b.ReadyURL)
 		if err != nil {
 			allOK = false
 			results = append(results, backendStatus{
@@ -85,12 +116,8 @@ func (h *ReadyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		resp.Body.Close()
-
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			results = append(results, backendStatus{
-				URL:    b.RawURL,
-				Status: "ok",
-			})
+			results = append(results, backendStatus{URL: b.RawURL, Status: "ok"})
 		} else {
 			allOK = false
 			results = append(results, backendStatus{
@@ -116,40 +143,22 @@ func (h *ReadyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func mustParseURL(raw string) *url.URL {
-	u, err := url.Parse(raw)
-	if err != nil {
-		log.Fatalf("Invalid URL %q: %v", raw, err)
-	}
-	return u
-}
-
 func main() {
 	backendsStr := os.Getenv("BACKENDS")
 	if backendsStr == "" {
 		backendsStr = "http://api-1:8080,http://api-2:8080"
 	}
 	backendsList := strings.Split(backendsStr, ",")
-
 	if len(backendsList) < 2 {
 		log.Fatalf("At least 2 backends required, got: %d", len(backendsList))
 	}
 
-	// Build reverse proxies for round-robin forwarding
-	proxy := &RoundRobinProxy{
-		backends: make([]*httputil.ReverseProxy, len(backendsList)),
-	}
-	backendInfos := make([]BackendInfo, 0, len(backendsList))
-
-	// Unix socket directory for proxy↔API communication
 	unixSocketDir := os.Getenv("UNIX_SOCKET_DIR")
 	if unixSocketDir == "" {
 		unixSocketDir = "/run/sock"
 	}
 
-	// Configure HTTP transport with Unix sockets and connection pooling.
-	// The DialContext uses the custom Unix socket dialer (not TCP) with
-	// a 2s timeout to avoid hanging on unavailable backends.
+	// Shared transport for both proxy and ready checks
 	proxyTransport := &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 50,
@@ -157,15 +166,31 @@ func main() {
 		DialContext:         unixSocketDialer(unixSocketDir),
 	}
 
-	for i, b := range backendsList {
+	var rawBackends []string
+	var backendInfos []BackendInfo
+
+	for _, b := range backendsList {
 		trimmed := strings.TrimSpace(b)
+		rawBackends = append(rawBackends, trimmed)
 		backendInfos = append(backendInfos, BackendInfo{
 			RawURL:   trimmed,
 			ReadyURL: strings.TrimRight(trimmed, "/") + "/ready",
 		})
-		rp := httputil.NewSingleHostReverseProxy(mustParseURL(trimmed))
-		rp.Transport = proxyTransport
-		proxy.backends[i] = rp
+	}
+
+	// Round-robin proxy: http.Client with Unix socket transport
+	proxy := &RoundRobinProxy{
+		backends: rawBackends,
+		client: &http.Client{
+			Transport: proxyTransport,
+			Timeout:   1 * time.Second,
+		},
+	}
+
+	// Ready checks use the same transport
+	readyClient := &http.Client{
+		Transport: proxyTransport,
+		Timeout:   1 * time.Second,
 	}
 
 	port := os.Getenv("PORT")
@@ -173,12 +198,10 @@ func main() {
 		port = "9999"
 	}
 
-	// Route: GET /ready is handled locally; everything else via round-robin.
 	mux := http.NewServeMux()
-	mux.Handle("GET /ready", &ReadyHandler{backends: backendInfos})
+	mux.Handle("GET /ready", &ReadyHandler{backends: backendInfos, client: readyClient})
 	mux.Handle("/", proxy)
 
-	// Configure server with timeouts to prevent connection accumulation
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           mux,
