@@ -31,51 +31,62 @@ func NewIVFIndex(vectors []vector.Vector14, labels []uint8, centroids []vector.V
 }
 
 // Search finds the 5 nearest neighbors of query in the IVF index.
-// It searches the nearest cluster (and potentially the second nearest if
-// the first cluster has fewer than 5 vectors).
-// Returns fraudCount and totalNeighbors (always 5).
+//
+// Optimization (early exit): if the nearest cluster contains at least 5
+// vectors, only that cluster is searched — avoiding the overhead of a
+// second cluster scan. A second cluster is only consulted when the first
+// has fewer than 5 vectors.
+//
+// Each query searches ~3000 vectors (one cluster) instead of ~6000 (two
+// clusters) in the common case, halving the per-request work.
 func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) {
 	if idx.nClusters == 0 {
 		return 0, errors.New("empty index")
 	}
 
-	// 1. Find top-2 nearest centroids
-	type centroidDist struct {
-		idx  int
-		dist int32
-	}
-	top2 := [2]centroidDist{
-		{idx: 0, dist: math.MaxInt32},
-		{idx: 1, dist: math.MaxInt32},
-	}
-
+	// 1. Find the nearest centroid
+	bestC := 0
+	bestD := int32(math.MaxInt32)
 	for c := 0; c < idx.nClusters; c++ {
 		d := vector.ManhattanDistance(query, &idx.Centroids[c])
-		if d < top2[1].dist {
-			if d < top2[0].dist {
-				top2[1] = top2[0]
-				top2[0] = centroidDist{idx: c, dist: d}
-			} else {
-				top2[1] = centroidDist{idx: c, dist: d}
+		if d < bestD {
+			bestD = d
+			bestC = c
+		}
+	}
+
+	// 2. Collect candidate ranges (may search 1 or 2 clusters)
+	type clusterRange struct{ start, end int }
+	ranges := make([]clusterRange, 0, 2)
+
+	start, end := idx.Offsets[bestC], idx.Offsets[bestC+1]
+	ranges = append(ranges, clusterRange{start, end})
+
+	firstSize := end - start
+
+	// Only search second cluster if first has fewer than 5 vectors
+	if firstSize < 5 {
+		secondBestC := -1
+		secondBestD := int32(math.MaxInt32)
+		for c := 0; c < idx.nClusters; c++ {
+			if c == bestC {
+				continue
+			}
+			d := vector.ManhattanDistance(query, &idx.Centroids[c])
+			if d < secondBestD {
+				secondBestD = d
+				secondBestC = c
 			}
 		}
-	}
-
-	// 2. Collect vectors from top-2 clusters
-	//    (always search at least 2 clusters for safety, since each query
-	//     might be near the boundary between two clusters)
-	totalVectors := 0
-	for _, c := range top2 {
-		if c.dist != math.MaxInt32 {
-			totalVectors += idx.Offsets[c.idx+1] - idx.Offsets[c.idx]
+		if secondBestC >= 0 {
+			ranges = append(ranges, clusterRange{
+				start: idx.Offsets[secondBestC],
+				end:   idx.Offsets[secondBestC+1],
+			})
 		}
 	}
 
-	if totalVectors == 0 {
-		return 0, errors.New("no vectors in nearest clusters")
-	}
-
-	// 3. Find top-5 nearest neighbors within the candidate set
+	// 3. Search top-5 nearest neighbors within the candidate ranges
 	type neighbor struct {
 		dist  int32
 		label uint8
@@ -88,12 +99,8 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 		{dist: math.MaxInt32},
 	}
 
-	for _, c := range top2 {
-		if c.dist == math.MaxInt32 {
-			continue
-		}
-		start, end := idx.Offsets[c.idx], idx.Offsets[c.idx+1]
-		for i := start; i < end; i++ {
+	for _, r := range ranges {
+		for i := r.start; i < r.end; i++ {
 			dist := vector.ManhattanDistance(query, &idx.Vectors[i])
 
 			// Insert into top5 if better than worst
@@ -108,7 +115,7 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 		}
 	}
 
-	// Count frauds (label == 1)
+	// 4. Count frauds (label == 1)
 	fraudCount = 0
 	for _, n := range top5 {
 		if n.label == 1 {

@@ -25,6 +25,10 @@ import (
 // sockets. The hostname from the URL is extracted to determine the
 // correct socket file.
 func unixSocketDialer(socketDir string) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := &net.Dialer{
+		Timeout:   2 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		// addr is like "api-1:8080" — extract hostname for socket name
 		host, _, err := net.SplitHostPort(addr)
@@ -32,7 +36,7 @@ func unixSocketDialer(socketDir string) func(ctx context.Context, network, addr 
 			host = addr
 		}
 		socketPath := socketDir + "/" + host + ".sock"
-		return net.Dial("unix", socketPath)
+		return d.DialContext(ctx, "unix", socketPath)
 	}
 }
 
@@ -143,9 +147,9 @@ func main() {
 		unixSocketDir = "/run/sock"
 	}
 
-	// Configure HTTP transport with Unix sockets and connection pooling
-	// Unix sockets eliminate TCP/IP overhead between proxy and APIs,
-	// reducing per-request latency from ~100μs to <10μs.
+	// Configure HTTP transport with Unix sockets and connection pooling.
+	// The DialContext uses the custom Unix socket dialer (not TCP) with
+	// a 2s timeout to avoid hanging on unavailable backends.
 	proxyTransport := &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 50,
@@ -174,8 +178,19 @@ func main() {
 	mux.Handle("GET /ready", &ReadyHandler{backends: backendInfos})
 	mux.Handle("/", proxy)
 
+	// Configure server with timeouts to prevent connection accumulation
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 500 * time.Millisecond,
+		ReadTimeout:       1 * time.Second,
+		WriteTimeout:      1 * time.Second,
+		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    4096,
+	}
+
 	log.Printf("Proxy starting on port %s, backends: %v\n", port, backendsList)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Proxy error: %v", err)
 	}
 }

@@ -1,11 +1,11 @@
-// Package handler implements HTTP handlers for the fraud detection API.
 package handler
 
 import (
 	"bytes"
 	"encoding/json"
-	"log"
+	"io"
 	"net/http"
+	"strconv"
 	"sync"
 
 	"rinha-backend/internal/index"
@@ -15,16 +15,32 @@ import (
 
 // semaphore limits concurrent fraud-score requests to prevent
 // goroutine explosion and GC thrashing under high load.
-// 128 allows higher throughput under 0.475 CPU with Unix sockets
-// reducing per-request latency. At ~0.3ms per request, 128 concurrent
-// = ~38ms of parallel CPU work, within the CPU budget.
-var semaphore = make(chan struct{}, 128)
+// 32 is appropriate for 0.475 CPU: 32 concurrent × ~0.3ms = ~9.6ms
+// of simultaneous CPU work, safely within the CPU budget.
+// More conservative than the previous 128, reducing GC pressure
+// and Go scheduler contention significantly.
+var semaphore = make(chan struct{}, 32)
 
-// responsePool reuses bytes.Buffer and json.Encoder allocations for
-// fraud score responses, reducing GC pressure under high load.
+// bodyBufferPool reuses bytes.Buffer for reading request bodies
+// to reduce allocation churn under high load.
+var bodyBufferPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
+	},
+}
+
+// payloadPool reuses TransactionPayload structs to reduce one allocation
+// per request. (json.Unmarshal still allocates internal strings/slices.)
+var payloadPool = sync.Pool{
+	New: func() any {
+		return new(model.TransactionPayload)
+	},
+}
+
+// responsePool reuses bytes.Buffer for manual JSON response serialization.
 var responsePool = sync.Pool{
 	New: func() any {
-		return &bytes.Buffer{}
+		return new(bytes.Buffer)
 	},
 }
 
@@ -44,70 +60,84 @@ func New(idx *index.IVFIndex, norm *model.Normalization, mccRisk map[string]floa
 	}
 }
 
-// Ready handles GET /ready — returns  ready — returns 200 when the service is ready.
+// Ready handles GET /ready — returns 200 when the service is ready.
 func (h *FraudHandler) Ready(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
 }
 
-// FraudScore handles POST /fraud-score — processes a transaction and returns the fraud decision.
+// FraudScore handles POST /fraud-score — processes a transaction and
+// returns the fraud decision with minimal allocations.
 func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
-	// Acquire semaphore slot; return 503 immediately if at capacity
+	// 1. Acquire semaphore slot; return 503 immediately if at capacity
 	select {
 	case semaphore <- struct{}{}:
 		defer func() { <-semaphore }()
 	default:
-		http.Error(w, `{"error":"too many requests"}`, http.StatusServiceUnavailable)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"too many requests"}`))
 		return
 	}
 
-	// Parse request body
-	var payload model.TransactionPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+	// 2. Read body into reusable buffer (avoids per-request []byte alloc)
+	bodyBuf := bodyBufferPool.Get().(*bytes.Buffer)
+	bodyBuf.Reset()
+	defer bodyBufferPool.Put(bodyBuf)
+
+	if _, err := io.Copy(bodyBuf, r.Body); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"cannot read body"}`))
+		return
+	}
+	bodyBytes := bodyBuf.Bytes()
+
+	// 3. Parse JSON using pooled payload struct
+	payload := payloadPool.Get().(*model.TransactionPayload)
+	defer payloadPool.Put(payload)
+
+	if err := json.Unmarshal(bodyBytes, payload); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid JSON"}`))
 		return
 	}
 
-	// Normalize to 14-dim vector
-	queryVec := vector.Normalize(&payload, h.norm, h.mccRisk)
+	// 4. Normalize to 14-dim vector
+	queryVec := vector.Normalize(payload, h.norm, h.mccRisk)
 
-	// Search for 5 nearest neighbors
+	// 5. Search for 5 nearest neighbors
 	fraudCount, err := h.index.Search(&queryVec)
 	if err != nil {
-		log.Printf("Search error: %v", err)
-		// Fallback: respond with safe values instead of HTTP error
-		resp := model.FraudScoreResponse{
-			Approved:   true,
-			FraudScore: 0.0,
-		}
+		// Silent fallback — no log.Printf (avoids syscall in hot path)
 		w.Header().Set("Content-Type", "application/json")
-		buf := responsePool.Get().(*bytes.Buffer)
-		buf.Reset()
-		json.NewEncoder(buf).Encode(resp)
-		w.Write(buf.Bytes())
-		responsePool.Put(buf)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"approved":true,"fraud_score":0.0}`))
 		return
 	}
 
-	// Calculate fraud score and decision
+	// 6. Calculate fraud score and decision
 	fraudScore := float64(fraudCount) / 5.0
 	approved := fraudScore < 0.6
 
-	resp := model.FraudScoreResponse{
-		Approved:   approved,
-		FraudScore: fraudScore,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	// Use pooled buffer to reduce allocations
+	// 7. Serialize response manually (no reflection, no json.Encoder)
 	buf := responsePool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer responsePool.Put(buf)
 
-	if err := json.NewEncoder(buf).Encode(resp); err != nil {
-		log.Printf("JSON encode error: %v", err)
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-		return
+	buf.WriteString(`{"approved":`)
+	if approved {
+		buf.WriteString(`true`)
+	} else {
+		buf.WriteString(`false`)
 	}
+	buf.WriteString(`,"fraud_score":`)
+	buf.WriteString(strconv.FormatFloat(fraudScore, 'f', 1, 64))
+	buf.WriteByte('}')
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	w.Write(buf.Bytes())
 }

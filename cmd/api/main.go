@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"rinha-backend/internal/handler"
@@ -16,6 +17,12 @@ import (
 )
 
 func main() {
+	// Pin GOMAXPROCS to 1 to match the 0.475 CPU container limit.
+	// The default GOMAXPROCS matches the host's physical CPUs, which
+	// can be much higher than the container quota, causing thread
+	// thrashing and excessive Go scheduler overhead.
+	runtime.GOMAXPROCS(1)
+
 	// If -build-index flag is set, pre-build the IVF index to a file and exit.
 	// This is used during Docker build to produce a ready-to-load index,
 	// reducing startup time from ~90s to <1s.

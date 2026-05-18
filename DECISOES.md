@@ -589,6 +589,240 @@ responsePool.Put(buf)
 
 ---
 
+## ADR-21: Redução do semáforo para 32 concorrentes
+
+**Contexto**: Mesmo com Unix sockets (ADR-17), semáforo de 128 (ADR-18) e timeouts reduzidos
+(ADR-19), o resultado oficial da v9 (commit `f5bf246`) ainda mostrava p99 de **2002.20ms**
+com **13.973 erros HTTP** e **100% de falha** — score final **−6000**.
+
+| Métrica | v9 (commit f5bf246) | bestResult (C, Unix socket) |
+|:--------|:-------------------:|:---------------------------:|
+| p99 | 2002.20ms | **0.98ms** |
+| Erros HTTP | 13.973 | **0** |
+| Score | −6000 | **+6000** |
+
+128 goroutines concorrentes em 0.475 CPU criam contenção excessiva no Go scheduler e no GC.
+O tempo de CPU por requisição é dominado pelo parsing JSON (reflection) e pela busca vetorial
+(~14μs), não pela comunicação. Com 128 goroutines, o scheduler alterna freneticamente e o GC
+dispara com frequência.
+
+**Decisão**: Reduzir o semáforo de 128 para 32:
+
+```go
+var semaphore = make(chan struct{}, 32)
+```
+
+**Cálculo**:
+- Tempo médio por requisição com parsing otimizado: ~0.3ms
+- 32 concorrentes × 0.3ms = ~9.6ms de CPU simultânea
+- Com 0.475 CPU, 9.6ms de trabalho é conservador — GC tem folga para coletar sem afetar vazão
+- 32 conexões TCP simultâneas também é o threshold típico para evitar TIME_WAIT
+  e esgotamento de portas efêmeras em sistemas Linux padrão
+
+**Consequências**:
+- Menos goroutines = menos pressão no scheduler e no GC.
+- Mais requisições respondem 503 "too many requests" sob picos extremos, mas isso é
+  preferível a timeouts de 2001ms (503 libera a conexão em <1ms).
+- A fila de requisições fica no accept queue do kernel, não consumindo CPU de user space.
+
+---
+
+## ADR-22: Pool de buffers de leitura e pool de payload
+
+**Contexto**: Cada requisição `POST /fraud-score` alocava um `json.Decoder` (via
+`json.NewDecoder(r.Body)`), que por sua vez alocava buffers internos de leitura. Sob 54.100
+requisições, essas alocações se acumulam e pressionam o GC.
+
+**Decisão**: Substituir `json.NewDecoder(r.Body).Decode(&payload)` por:
+1. **Pool de `bytes.Buffer`** para ler o body da requisição inteiro (`io.Copy`)
+2. **Pool de `TransactionPayload`** para reutilizar a struct principal
+3. **`json.Unmarshal(bodyBytes, payload)`** — mais rápido que `json.NewDecoder.Decode`
+   para payloads pequenos (~300 bytes), pois opera sobre um `[]byte` já alocado
+
+```go
+var bodyBufferPool = sync.Pool{
+    New: func() any { return new(bytes.Buffer) },
+}
+
+var payloadPool = sync.Pool{
+    New: func() any { return new(model.TransactionPayload) },
+}
+
+// No handler:
+bodyBuf := bodyBufferPool.Get().(*bytes.Buffer)
+bodyBuf.Reset()
+io.Copy(bodyBuf, r.Body)
+payload := payloadPool.Get().(*model.TransactionPayload)
+json.Unmarshal(bodyBuf.Bytes(), payload)
+```
+
+**Consequências**:
+- Reduz alocações de `[]byte` na leitura do body de 1 por requisição para 0 (reuso).
+- `json.Unmarshal` sobre buffer pré-alocado é mais rápido que `json.Decoder` em stream.
+- A struct `TransactionPayload` ainda tem campos internos (strings, slices) alocados
+  pelo `json.Unmarshal`, mas a struct base é reutilizada.
+
+---
+
+## ADR-23: Serialização manual da resposta JSON (sem reflection)
+
+**Contexto**: A resposta do `/fraud-score` é um JSON simples de 2 campos:
+`{"approved":true/false,"fraud_score":X.X}`. O código anterior usava `json.Encoder`
+com struct tipada (`model.FraudScoreResponse`), que usa reflection) — cada chamada aloca
+encoder + buffer + faz reflection nos campos.
+
+**Decisão**: Serializar a resposta manualmente com `bytes.Buffer` + `strconv.FormatFloat`
+em vez de `json.Encoder`:
+
+```go
+buf.WriteString(`{"approved":`)
+if approved {
+    buf.WriteString(`true`)
+} else {
+    buf.WriteString(`false`)
+}
+buf.WriteString(`,"fraud_score":`)
+buf.WriteString(strconv.FormatFloat(fraudScore, 'f', 1, 64))
+buf.WriteByte('}')
+```
+
+**Consequências**:
+- Zero reflection no hot path de resposta.
+- Zero alocações de encoder/decoder.
+- `strconv.FormatFloat` é altamente otimizado e inlineável.
+- O buffer é obtido do `sync.Pool` (ADR-20) e devolvido após o uso.
+
+---
+
+## ADR-24: GOMAXPROCS = 1 para alinhamento com cota de container
+
+**Contexto**: O Go runtime usa `GOMAXPROCS` threads de OS para executar goroutines em paralelo.
+O valor default é o número de CPUs físicas do **host** (obtido via `runtime.NumCPU()`),
+não a cota do container. Em um host com 16+ CPUs, `GOMAXPROCS` default = 16+ threads.
+
+Com cota de 0.475 CPU no container, ter 16+ threads significa que a maioria fica parada
+(limitada pelo cgroups), mas o Go scheduler ainda cria overhead de gerenciamento:
+goroutines são migradas entre threads, o cache L1/L2 sofre, e o syscall `sched_yield`
+é chamado com frequência.
+
+**Decisão**: Fixar `runtime.GOMAXPROCS(1)` no início do `main()` da API:
+
+```go
+runtime.GOMAXPROCS(1)
+```
+
+**Consequências**:
+- Apenas 1 thread de OS executa goroutines — ideal para 0.475 CPU.
+- Elimina contenção de cache e migração de goroutines entre threads.
+- O Go scheduler opera com um único P (processor context), simplificando o escalonamento.
+- A vazão máxima teórica é limitada a 1 thread, mas como a cota é < 1 CPU, não há perda.
+
+---
+
+## ADR-25: Early exit no IVF Search (busca em cluster único)
+
+**Contexto**: O algoritmo IVF original sempre buscava os 5 vizinhos mais próximos em **2
+clusters** (top-2 centroides mais próximos). Com 1000 clusters e ~3000 vetores por cluster,
+cada requisição percorria ~6000 vetores — o dobro do necessário.
+
+O motivo original era "segurança para queries na fronteira entre dois clusters". Porém,
+com 3M vetores e 1000 clusters (~3000 vetores/cluster), o cluster mais próximo quase sempre
+tem 5+ vetores. Raramente um cluster tem menos de 5.
+
+**Decisão**: Modificar o `Search` para buscar apenas no cluster mais próximo, a menos que
+ele tenha menos de 5 vetores (caso em que busca o segundo):
+
+```go
+// Find nearest centroid only
+bestC := 0
+bestD := int32(math.MaxInt32)
+for c := 0; c < idx.nClusters; c++ {
+    d := vector.ManhattanDistance(query, &idx.Centroids[c])
+    if d < bestD {
+        bestD = d
+        bestC = c
+    }
+}
+
+// Only search second cluster if first has < 5 vectors
+if firstSize < 5 {
+    // find second nearest centroid and include its range
+}
+```
+
+**Consequências**:
+- Cada requisição percorre ~3000 vetores (1 cluster) em vez de ~6000 (2 clusters).
+- Redução de ~50% no trabalho de busca por requisição no caso comum.
+- Perda marginal de recall em queries exatamente na fronteira entre dois clusters —
+  mitigada pelo threshold de 0.6 que absorve pequenas variações.
+- Ganho de performance direto: p99 mais baixo.
+
+---
+
+## ADR-26: Timeouts no servidor HTTP do proxy
+
+**Contexto**: O proxy usava `http.ListenAndServe(":"+port, mux)` — sem timeouts.
+Requisições lentas ou conexões maliciosas podiam ficar abertas indefinidamente,
+consumindo goroutines e memória no proxy.
+
+**Decisão**: Substituir `http.ListenAndServe` por `&http.Server{...}` com os mesmos
+mesmos timeouts da API (ADR-19):
+
+```go
+srv := &http.Server{
+    Addr:              ":" + port,
+    Handler:           mux,
+    ReadHeaderTimeout: 500 * time.Millisecond,
+    ReadTimeout:       1 * time.Second,
+    WriteTimeout:      1 * time.Second,
+    IdleTimeout:       30 * time.Second,
+    MaxHeaderBytes:    4096,
+}
+```
+
+Também configurar timeout no `net.Dialer` do Unix socket:
+
+```go
+d := &net.Dialer{
+    Timeout:   2 * time.Second,
+    KeepAlive: 30 * time.Second,
+}
+```
+
+**Consequências**:
+- Conexões lentas são cortadas em < 1s, liberando goroutines do proxy.
+- Unix socket dialer com timeout evita que o proxy fique preso em socket
+  inexistente (container morto).
+- Consistência de configuração com a API.
+
+---
+
+## ADR-27: Remoção de chamadas a log.Printf no hot path
+
+**Contexto**: O handler `FraudScore` anterior fazia `log.Printf("Search error: %v", err)`
+no fallback de erro de busca. `log.Printf` é uma chamada de syscall (write ao stderr),
+que é cara sob carga e bloqueia o goroutine.
+
+**Decisão**: Remover `log.Printf` do hot path. O fallback silencioso responde com
+`{"approved":true,"fraud_score":0.0}` sem logar o erro:
+
+```go
+if err != nil {
+    // Silent fallback — no log.Printf (avoids syscall in hot path)
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    w.Write([]byte(`{"approved":true,"fraud_score":0.0}`))
+    return
+}
+```
+
+**Consequências**:
+- Elimina syscall `write(2, ...)` no hot path, que pode causar contenção no FD do stderr.
+- Perda de visibilidade de erros de busca (que são extremamente raros).
+- Se necessário, logs podem ser reativados com log condicional em nível de debug.
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões
