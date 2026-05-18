@@ -1022,6 +1022,168 @@ proxy extrai da URL do backend, alinhando a nomenclatura dos sockets.
 
 ---
 
+## ADR-32: Pool de buffers e semáforo no proxy
+
+**Contexto**: O proxy usava `io.ReadAll(r.Body)` para ler o corpo de cada requisição,
+alocando um `[]byte` novo por requisição (~300 bytes cada × 54.100 requisições
+= ~16MB alocados durante o teste). Além disso, cada requisição spawnava uma
+goroutine no `http.ServeMux` — sob pico, centenas de goroutines competiam por
+0.10 CPU.
+
+**Decisão**:
+1. **Pool de buffers**: `sync.Pool` com `bytes.Buffer` para ler o body via `io.Copy`,
+   reutilizando o buffer entre requisições
+2. **Semáforo de concorrência** (`chan struct{}` com capacidade 64): limite de
+   64 requisições simultâneas no proxy. Se o limite for atingido, responde
+   HTTP 503 ("too many requests") em vez de acumular conexões.
+
+```go
+var bodyBufPool{
+    New: funcbytes.Buffer},
+}
+
+var proxySem = make(chan struct{}, 64)
+
+func Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    select {}
+    case proxySem {}
+        defer func() { <-proxySem }()
+        http.Error(w, `{"error":"too many requests"}`, http.StatusServiceUnavailable)
+        return
+    }
+    ...
+}
+```
+
+**Consequências**:
+- Zero alocações de `[]byte` para body no proxy (reuso via pool).
+- Limite de 64 goroutines simultâneas evita thrashing no Go scheduler.
+- `io.ReadAll` removida — substituída por `io.Copy` em buffer reutilizado.
+- O buffer é devolvido ao pool assim que `http.Client.Do` termina de ler o body.
+
+---
+
+## ADR-33: json.Unmarshal com pool de buffers na API
+
+**Contexto**: O handler `FraudScore` usava `json.NewDecoder(r.Body).Decode(payload)`,
+que cria um decoder com buffers internos de stream. Para payloads de ~300 bytes,
+o overhead do decoder é desnecessário — `json.Unmarshal` sobre `[]byte` é mais
+rápido porque trabalha sobre o slice completo sem a máquina de estados do stream.
+
+**Decisão**: Substituir `json.NewDecoder(r.Body).Decode(payload)` por:
+1. Leitura do body em um `bytes.Buffer` reutilizável (`bodyBufPool`)
+2. `json.Unmarshal(bodyBytes, payload)` sobre o slice do buffer
+3. Devolução do buffer ao pool imediatamente após o parse
+
+```go
+bodyBuf := bodyBufPool.(bytes.Buffer)
+bodyBuf.Reset()
+io.Copy(bodyBuf, r.Body)
+bodyBytes := bodyBuf.Bytes()
+
+if err := json.Unmarshal(bodyBytes, payload); err != nil {
+    bodyBufPool.Put(bodyBuf)
+    // error response
+    return
+}
+bodyBufPool.Put(bodyBuf)
+```
+
+**Consequências**:
+- Elimina a alocação do `json.Decoder` e seus buffers internos de stream.
+- `json.Unmarshal` opera sobre `[]byte` já residente no buffer reutilizado.
+- Body buffer reutilizado entre requisições, eliminando alocações de leitura.
+- A struct `TransactionPayload` continua sendo reutilizada via `payloadPool` (ADR-22).
+
+---
+
+## ADR-34: Busca em 2 clusters (desfaz ADR-25)
+
+**Contexto**: O ADR-25 introduziu "early exit" na busca IVF: apenas o cluster
+mais próximo era consultado, a menos que ele tivesse menos de 5 vetores. Isso
+reduzia o trabalho de busca pela metade (~3000 vetores vs ~6000), mas causava
+perda de recall em transações na fronteira entre dois clusters.
+
+Análise dos resultados v15 (que teve 1906 requisições processadas) mostrou
+19 FP e 21 FN — erros de detecção atribuíveis ao recall imperfeito do IVF
+com busca em 1 cluster. O sistema de referência (MXLange, C com brute force
+ou IVF de alta precisão) obteve 0 FP e 0 FN.
+
+**Decisão**: Desfazer o ADR-25. A busca agora **sempre** consulta 2 clusters,
+o primeiro e o segundo mais próximos:
+
+```go
+// Always search second nearest cluster for better recall.
+secondBestC := -1
+secondBestD := int32(math.MaxInt32)
+for c := 0; c < idx.nClusters; c++ {
+    if c == bestC { continue }
+    d := vector.ManhattanDistance(query, &idx.Centroids[c])
+    if d < secondBestD {
+        secondBestD = d
+        secondBestC = c
+    ranges = append(ranges, clusterRange{
+        start: idx.Offsets[secondBestC],
+        end:   idx.Offsets[secondBestC+1],
+    })
+}
+```
+
+**Cálculo de impacto**:
+- Antes: ~3000 vetores por consulta (1 cluster) → ~42μs a 14ns/vetor
+- Depois: ~6000 vetores por consulta clusters) → ~84μs
+- Ainda bem abaixo do p99 alvo < 10ms
+
+**Consequências**:
+- Recall próximo do brute force (~99.9%+), eliminando FPs e FNs de fronteira.
+- Tempo de busca dobra *ouro) mas permanece em dezenas de microssegundos —
+  irrelevante no p99 total.
+
+---
+
+## ADR-35: K-means++ + 10 iterações no mini-batch K-means
+
+**Contexto**: A inicialização de centroides usava amostragem uniforme
+(`i * n / nClusters`), que é determinística e pode produzir centroides mal
+distribuídos se os dados tiverem estrutura de cluster não uniforme.
+Além disso, o mini-batch K-means rodava apenas 5 iterações com 5% da amostra,
+o que pode não ser suficiente para convergência com 1000 clusters.
+
+**Decisão**:
+1. **K-means++ parcial** para os primeiros 20 centroides: em vez de
+   amostragem uniforme, escolher centroides com probabilidade proporcional
+   ao quadrado da distância ao centroide mais próximo já selecionado.
+   Aplicado sobre uma amostra de 2% do dataset para manter o custo baixo
+   (~12.6M distâncias vs ~21B para K-means++ completo).
+2. **Centroides 21-1000**: permanecem com amostragem uniforme.
+3. **Iterações**: aumentadas de 5 para 10, com batch de 10% (vs 5%)
+   para melhor convergência.
+
+```go
+// K-means++ for first 20 centroids on a 2% sample
+kppCount := 20
+sampleSize := n / 50  // 2%
+
+for c:=1; c < kppCount; c++ {
+    // Weighted by D² to nearest existing centroid
+    totalWeight += float64(bestD) * float64(bestD)
+}
+// Weighted random selection
+```
+
+**Custo computacional**:
+- K-means++ parcial: ~12.6M distâncias de Manhattan (~176ms)
+- Mini-batch K-means (10 iterações × 10%): ~3B distâncias (~42s)
+- Total adicional no Docker build: ~42s (sobre os ~70s existentes)
+
+**Consequências**:
+- Centroides iniciais mais bem distribuídos → agrupamentos mais representativos.
+- Mais iterações e maior batch → centroides finais mais estáveis.
+- Recall marginalmente melhor (difícil de quantificar, mas consistente com
+  a busca em 2 clusters do ADR-34).
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões

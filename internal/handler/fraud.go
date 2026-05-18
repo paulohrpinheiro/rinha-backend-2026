@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"sync"
@@ -25,6 +26,15 @@ var semaphore = make(chan struct{}, 32)
 var payloadPool = sync.Pool{
 	New: func() any {
 		return new(model.TransactionPayload)
+	},
+}
+
+// bodyBufPool reuses byte buffers for reading request bodies.
+// Avoids allocation per request (~300 bytes each) and lets json.Unmarshal
+// operate directly on the reused slice instead of streaming via json.Decoder.
+var bodyBufPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
 	},
 }
 
@@ -72,16 +82,23 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Parse JSON directly from request body (skip intermediate buffer copy)
+	// 2. Read body into reusable buffer and parse JSON (avoids decoder + stream allocations)
 	payload := payloadPool.Get().(*model.TransactionPayload)
 	defer payloadPool.Put(payload)
 
-	if err := json.NewDecoder(r.Body).Decode(payload); err != nil {
+	bodyBuf := bodyBufPool.Get().(*bytes.Buffer)
+	bodyBuf.Reset()
+	io.Copy(bodyBuf, r.Body)
+	bodyBytes := bodyBuf.Bytes()
+
+	if err := json.Unmarshal(bodyBytes, payload); err != nil {
+		bodyBufPool.Put(bodyBuf)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"invalid JSON"}`))
 		return
 	}
+	bodyBufPool.Put(bodyBuf)
 
 	// 3. Normalize to 14-dim vector
 	queryVec := vector.Normalize(payload, h.norm, h.mccRisk)

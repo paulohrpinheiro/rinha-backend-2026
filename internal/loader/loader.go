@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"math"
 	"math/rand/v2"
 	"os"
 	"unsafe"
@@ -273,28 +274,85 @@ func LoadReferences(path string) ([]vector.Vector14, []uint8, error) {
 }
 
 // BuildIVFIndex builds an IVF index from quantized vectors.
-// It selects nClusters centroids at regular intervals and assigns
-// each vector to the nearest centroid, then reorders for fast lookups.
+// It initializes centroids using K-means++ on a sample (better cluster
+// separation than uniform sampling), runs 10 iterations of mini-batch
+// K-means, then assigns all vectors and reorders for fast lookup.
 func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]vector.Vector14, []uint8, []vector.Vector14, []int, error) {
 	n := len(vectors)
 	if n == 0 || nClusters <= 0 {
 		return nil, nil, nil, nil, nil
 	}
 
-	// 1. Initialize centroids by sampling uniformly from the dataset
+	rng := rand.New(rand.NewPCG(42, 0))
+
+	// 1a. K-means++ initialization on a 2% sample for the first 20 centroids
+	//     This produces better-spread centroids than uniform sampling alone.
 	centroids := make([]vector.Vector14, nClusters)
-	for i := range centroids {
-		idx := i * n / nClusters
+
+	kppCount := 20
+	if kppCount > nClusters {
+		kppCount = nClusters
+	}
+
+	sampleSize := n / 50 // 2% of dataset
+	if sampleSize < 10000 {
+		sampleSize = 10000
+	}
+	if sampleSize > n {
+		sampleSize = n
+	}
+
+	sampleIndices := make([]int, sampleSize)
+	for i := range sampleIndices {
+		sampleIndices[i] = rng.IntN(n)
+	}
+
+	// First centroid: random from sample
+	centroids[0] = vectors[sampleIndices[rng.IntN(sampleSize)]]
+
+	// Remaining K-means++ centroids: weighted by D² distance to nearest centroid
+	for c := 1; c < kppCount; c++ {
+		// Find nearest centroid distance for each sample vector
+		var totalWeight float64
+		minDist := make([]int32, sampleSize)
+		for i, idx := range sampleIndices {
+			bestD := int32(math.MaxInt32)
+			for j := 0; j < c; j++ {
+				d := vector.ManhattanDistance(&vectors[idx], &centroids[j])
+				if d < bestD {
+					bestD = d
+				}
+			}
+			minDist[i] = bestD
+			totalWeight += float64(bestD) * float64(bestD)
+		}
+
+		// Weighted random selection (D² weighting)
+		threshold := rng.Float64() * totalWeight
+		cum := 0.0
+		selected := sampleIndices[0]
+		for i := 0; i < sampleSize; i++ {
+			cum += float64(minDist[i]) * float64(minDist[i])
+			if cum >= threshold {
+				selected = sampleIndices[i]
+				break
+			}
+		}
+		centroids[c] = vectors[selected]
+	}
+
+	// 1b. Remaining centroids via uniform sampling
+	for c := kppCount; c < nClusters; c++ {
+		idx := c * n / nClusters
 		if idx >= n {
 			idx = n - 1
 		}
-		centroids[i] = vectors[idx]
+		centroids[c] = vectors[idx]
 	}
 
-	// 2. Run mini-batch K-means (5 iterations on sampled subsets)
-	rng := rand.New(rand.NewPCG(42, 0))
-	batchSize := n / 20 // 5% sample per iteration
-	if batchSize < nClusters {
+	// 2. Run mini-batch K-means (10 iterations on 10% sampled subsets)
+	batchSize := n / 10 // 10% sample per iteration
+	if batchSize < nClusters*5 {
 		batchSize = nClusters * 5
 	}
 	if batchSize > n {
@@ -303,7 +361,7 @@ func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]
 
 	clusterAssign := make([]int, n) // temp storage
 
-	for iter := 0; iter < 5; iter++ {
+	for iter := 0; iter < 10; iter++ {
 		// Pick random batch — avoid rng.Perm(n) which allocates n ints (~24MB)
 		batch := make([]int, batchSize)
 		for i := range batch {
@@ -376,7 +434,7 @@ func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]
 	}
 	offsets[nClusters] = total
 
-	// 5. Reorder vectors by cluster (in-place using a temporary array)
+	// 5. Reorder vectors by cluster
 	reorderedVecs := make([]vector.Vector14, n)
 	reorderedLabels := make([]uint8, n)
 	cursor := make([]int, nClusters)

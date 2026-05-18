@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -34,6 +35,17 @@ func unixSocketDialer(socketDir string) func(ctx context.Context, network, addr 
 	}
 }
 
+// bodyBufPool reuses byte buffers for reading request bodies,
+// avoiding allocation per request (~300 bytes each).
+var bodyBufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+// proxySem limits concurrent proxy requests to prevent goroutine explosion.
+// 64 is generous: with ~0.15ms per request and 0.10 CPU (100ms/s),
+// this allows up to ~42k req/s sustained throughput.
+var proxySem = make(chan struct{}, 64)
+
 // RoundRobinProxy is a minimal reverse proxy without the overhead of
 // httputil.ReverseProxy. It creates a fresh backend request, copies only
 // the Content-Type header, and streams the response back.
@@ -44,41 +56,56 @@ type RoundRobinProxy struct {
 }
 
 func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Pick backend via round-robin
-	idx := p.counter.Add(1) % uint64(len(p.backends))
-	backend := p.backends[idx]
-
-	// Read body into memory (small, ~300 bytes)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "cannot read body", http.StatusInternalServerError)
+	// 1. Acquire semaphore slot; return 503 immediately if at capacity
+	select {
+	case proxySem <- struct{}{}:
+		defer func() { <-proxySem }()
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"too many requests"}`))
 		return
 	}
 
-	// Build backend URL from the base URL + request path
+	// 2. Pick backend via round-robin
+	idx := p.counter.Add(1) % uint64(len(p.backends))
+	backend := p.backends[idx]
+
+	// 3. Read body into reusable buffer (avoids allocation per request)
+	bodyBuf := bodyBufPool.Get().(*bytes.Buffer)
+	bodyBuf.Reset()
+	if _, err := io.Copy(bodyBuf, r.Body); err != nil {
+		bodyBufPool.Put(bodyBuf)
+		http.Error(w, "cannot read body", http.StatusInternalServerError)
+		return
+	}
+	body := bodyBuf.Bytes()
+
+	// 4. Build backend URL from base URL + request path
 	targetURL := backend + r.URL.Path
 	breq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
+		bodyBufPool.Put(bodyBuf)
 		http.Error(w, "cannot create request", http.StatusInternalServerError)
 		return
 	}
 
-	// Forward only the Content-Type header — the API doesn't need other headers
+	// 5. Forward only Content-Type — API doesn't need other headers
 	breq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
 	breq.ContentLength = int64(len(body))
 
-	// Send to backend via http.Client (Unix socket transport)
+	// 6. Send to backend via http.Client (Unix socket transport)
 	resp, err := p.client.Do(breq)
+	// Body buffer is no longer needed after client.Do reads the reader
+	bodyBufPool.Put(bodyBuf)
 	if err != nil {
 		http.Error(w, "backend error", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Copy all response headers and body back to the client
-	for k, v := range resp.Header {
-		w.Header()[k] = v
-	}
+	// 7. Forward response — only Content-Type header (avoids copying Date, Content-Length, etc.)
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }

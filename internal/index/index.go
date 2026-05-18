@@ -55,35 +55,34 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 		}
 	}
 
-	// 2. Collect candidate ranges (may search 1 or 2 clusters)
+	// 2. Collect candidate ranges (always search 2 clusters for recall)
 	type clusterRange struct{ start, end int }
 	ranges := make([]clusterRange, 0, 2)
 
 	start, end := idx.Offsets[bestC], idx.Offsets[bestC+1]
 	ranges = append(ranges, clusterRange{start, end})
 
-	firstSize := end - start
-
-	// Only search second cluster if first has fewer than 5 vectors
-	if firstSize < 5 {
-		secondBestC := -1
-		secondBestD := int32(math.MaxInt32)
-		for c := 0; c < idx.nClusters; c++ {
-			if c == bestC {
-				continue
-			}
-			d := vector.ManhattanDistance(query, &idx.Centroids[c])
-			if d < secondBestD {
-				secondBestD = d
-				secondBestC = c
-			}
+	// Always search second nearest cluster for better recall.
+	// Transactions near the boundary between two clusters may have their
+	// nearest neighbors in the adjacent cluster. Searching 2 clusters
+	// (~6000 vectors) brings recall close to brute-force levels.
+	secondBestC := -1
+	secondBestD := int32(math.MaxInt32)
+	for c := 0; c < idx.nClusters; c++ {
+		if c == bestC {
+			continue
 		}
-		if secondBestC >= 0 {
-			ranges = append(ranges, clusterRange{
-				start: idx.Offsets[secondBestC],
-				end:   idx.Offsets[secondBestC+1],
-			})
+		d := vector.ManhattanDistance(query, &idx.Centroids[c])
+		if d < secondBestD {
+			secondBestD = d
+			secondBestC = c
 		}
+	}
+	if secondBestC >= 0 {
+		ranges = append(ranges, clusterRange{
+			start: idx.Offsets[secondBestC],
+			end:   idx.Offsets[secondBestC+1],
+		})
 	}
 
 	// 3. Search top-5 nearest neighbors within the candidate ranges
