@@ -4,7 +4,7 @@ volumes:
 
 services:
   proxy:
-    image: paulohrpinheiro/rinha-proxy:v11
+    image: paulohrpinheiro/rinha-proxy:v15
     ports:
       - "9999:9999"
     environment:
@@ -27,7 +27,8 @@ services:
           memory: "20MB"
 
   api-1:
-    image: paulohrpinheiro/rinha-api:v11
+    hostname: api-1
+    image: paulohrpinheiro/rinha-api:v15
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
@@ -43,7 +44,8 @@ services:
           memory: "165MB"
 
   api-2:
-    image: paulohrpinheiro/rinha-api:v11
+    hostname: api-2
+    image: paulohrpinheiro/rinha-api:v15
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
