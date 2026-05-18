@@ -4,7 +4,7 @@ volumes:
 
 services:
   proxy:
-    image: paulohrpinheiro/rinha-proxy:v10
+    image: paulohrpinheiro/rinha-proxy:v11
     ports:
       - "9999:9999"
     environment:
@@ -23,11 +23,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.05"
+          cpus: "0.10"
           memory: "20MB"
 
   api-1:
-    image: paulohrpinheiro/rinha-api:v10
+    image: paulohrpinheiro/rinha-api:v11
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
@@ -39,11 +39,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.475"
+          cpus: "0.45"
           memory: "165MB"
 
   api-2:
-    image: paulohrpinheiro/rinha-api:v10
+    image: paulohrpinheiro/rinha-api:v11
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
@@ -55,7 +55,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.475"
+          cpus: "0.45"
           memory: "165MB"
 
 networks:
