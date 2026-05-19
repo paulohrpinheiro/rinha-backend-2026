@@ -10,18 +10,18 @@ import (
 	"rinha-backend/internal/vector"
 )
 
-// semaphore limits concurrent fraud-score requests via a blocking channel.
-// Unlike the non-blocking semaphore (ADR-16) that returned 503 when full,
-// this one blocks (parks the goroutine) until a slot opens.
+// semaphore limits concurrent fraud-score requests (non-blocking, large
+// capacity). 1024 slots rarely fills — at 180 req/s and ~45μs CPU each on
+// 0.425 cores, only ~10-20 slots are in use at steady state.
 //
-// Blocking is critical under GOMAXPROCS=1: a parked goroutine consumes
-// zero CPU and doesn't compete for the scheduler. Without this limit,
-// k6 bursts create hundreds of runnable goroutines that miss the 100ms
-// ReadHeaderTimeout, cascading into massive timeout errors.
+// Non-blocking (select/default) returns fast 503 when full instead of
+// blocking. The blocking semaphore (128) was worse than no semaphore:
+// it caused all 128 slots to fill, API goroutines parked, proxy waited,
+// proxy slots filled, k6 connections hung — 99% failure rate.
 //
-// 128 slots × 300μs worst-case CPU per slot = ~38ms max scheduler wait
-// (well under ReadHeaderTimeout). Zero requests are rejected.
-var semaphore = make(chan struct{}, 128)
+// With 1024 slots and non-blocking behavior, 503s are extremely rare
+// and, when they happen, fast (<1μs) — preventing cascade.
+var semaphore = make(chan struct{}, 1024)
 
 // payloadPool reuses codec.Payload structs and their internal buffers
 // (rawBuf, KnownMerchants slice) across requests, avoiding allocations.
@@ -55,12 +55,18 @@ func (h *FraudHandler) Ready(w http.ResponseWriter, r *http.Request) {
 // FraudScore handles POST /fraud-score — processes a transaction and
 // returns the fraud decision using binary codec (zero JSON allocations).
 func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
-	// Acquire blocking semaphore slot (parks goroutine if full — no 503).
-	// With GOMAXPROCS=1, a parked goroutine consumes zero CPU. The channel
-	// acts as both queue and concurrency limiter. At 128 slots, worst-case
-	// scheduler wait is ~38ms, well under the 100ms ReadHeaderTimeout.
-	semaphore <- struct{}{}
-	defer func() { <-semaphore }()
+	// Acquire non-blocking semaphore slot. 1024 capacity under normal load
+	// (180 req/s) means ~10-20 concurrent — never fills. If full (extreme
+	// burst), fast 503 prevents cascade (blocking caused 99% failure rate).
+	select {
+	case semaphore <- struct{}{}:
+		defer func() { <-semaphore }()
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"too many requests"}`))
+		return
+	}
 
 	// Decode binary payload directly via DecodeBytes (no io.Reader blocking).
 	// Read r.Body once — http.Server's body reader respects Content-Length

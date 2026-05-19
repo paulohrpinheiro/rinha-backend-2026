@@ -13,10 +13,10 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +25,17 @@ import (
 	"rinha-backend/internal/codec"
 	"rinha-backend/internal/model"
 )
+
+// fraudResponses holds the 6 possible JSON responses pre-computed.
+// Zero serialization in the hot path — just index by fraud count.
+var fraudResponses = [6][]byte{
+	[]byte(`{"approved":true,"fraud_score":0.0}`),
+	[]byte(`{"approved":true,"fraud_score":0.2}`),
+	[]byte(`{"approved":true,"fraud_score":0.4}`),
+	[]byte(`{"approved":false,"fraud_score":0.6}`),
+	[]byte(`{"approved":false,"fraud_score":0.8}`),
+	[]byte(`{"approved":false,"fraud_score":1.0}`),
+}
 
 // unixSocketDialer returns a dialer that connects to /run/sock/<hostname>.sock.
 func unixSocketDialer(socketDir string) func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -63,10 +74,12 @@ var encodeBufPool = sync.Pool{
 	New: func() any { return new(bytes.Buffer) },
 }
 
-// proxySem limits concurrent proxy requests via blocking channel.
-// 128 slots × 337μs worst-case = ~43ms max scheduler wait on 0.15 CPU,
-// well under the 100ms ReadHeaderTimeout. No 503 rejection.
-var proxySem = make(chan struct{}, 128)
+// proxySem limits concurrent proxy requests (non-blocking, large capacity).
+// 1024 slots ensures it rarely fills under normal load (180 req/s uses ~5
+// slots). If full under extreme burst, returns fast 503 instead of cascading
+// into timeouts — the blocking semaphore (128) caused proxy goroutines to
+// park waiting for API responses, filling proxy slots and cascading failures.
+var proxySem = make(chan struct{}, 1024)
 
 // RoundRobinProxy handles POST /fraud-score: parses JSON, encodes to binary,
 // forwards to an API, decodes binary response, returns JSON.
@@ -77,11 +90,20 @@ type RoundRobinProxy struct {
 }
 
 func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Acquire blocking semaphore slot (parks goroutine if full).
-	// With GOMAXPROCS=1 and 0.15 CPU, 128 slots × 337μs = ~43ms worst-case
-	// scheduler wait, well under the 100ms ReadHeaderTimeout.
-	proxySem <- struct{}{}
-	defer func() { <-proxySem }()
+	// Acquire non-blocking semaphore slot. With 1024 capacity, almost never
+	// full under normal load (~5 slots at 180 req/s). When full (extreme
+	// burst), fast 503 prevents the cascade: blocking semaphore caused proxy
+	// goroutines to park waiting for API responses, filling all 128 proxy
+	// slots, which blocked new k6 connections → k6 timeouts at 2001ms.
+	select {
+	case proxySem <- struct{}{}:
+		defer func() { <-proxySem }()
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write(fraudResponses[0])
+		return
+	}
 
 	// Pick backend via round-robin
 	idx := p.counter.Add(1) % uint64(len(p.backends))
@@ -177,22 +199,17 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 11. Serialize JSON response manually (no reflection)
-	var jsonBuf [64]byte
-	b := jsonBuf[:0]
-	b = append(b, `{"approved":`...)
-	if binResp.Approved {
-		b = append(b, `true`...)
-	} else {
-		b = append(b, `false`...)
+	// 11. Write pre-allocated JSON response (zero serialization)
+	fraudCount := int(math.Round(binResp.FraudScore * 5))
+	if fraudCount < 0 {
+		fraudCount = 0
+	} else if fraudCount > 5 {
+		fraudCount = 5
 	}
-	b = append(b, `,"fraud_score":`...)
-	b = strconv.AppendFloat(b, binResp.FraudScore, 'f', 1, 64)
-	b = append(b, '}')
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(b)
+	w.Write(fraudResponses[fraudCount])
 }
 
 // BackendInfo holds metadata for a single backend instance.

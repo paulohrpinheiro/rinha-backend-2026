@@ -86,14 +86,14 @@ README.md              # Este arquivo
 
 ## Resultados do Teste Oficial (Evolução)
 
-> Última submissão: v22 (commit `86145a5`) · Score final: **−6000** (pior possível)
+> Última submissão: v24 (commit `c3edb96`) · Score final: **−6000** (pior possível)
 
-### Resultados reais (v22)
+### Resultados reais (v24)
 
 | Componente | Valor | Corte |
 |:-----------|:-----:|:-----:|
-| `score_p99` | **−3000** | ✅ p99 = 2001.89ms > 2000ms |
-| `score_det` | **−3000** | ✅ failure_rate = 99.33% > 15% |
+| `score_p99` | **−3000** | ✅ p99 = 2001.85ms > 2000ms |
+| `score_det` | **−3000** | ✅ failure_rate = 99.28% > 15% |
 | **Final** | **−6000** | ⛔ Piso absoluto |
 
 ### Evolução completa
@@ -103,24 +103,25 @@ README.md              # Este arquivo
 | v10 | TCP, httputil, sem timeouts | 13.858 | 0 | 2002ms | −6000 |
 | v16 | codec binário | 52.601 | 1.370 | 1042ms | −3018 |
 | v20 | proxy custom, semáforo 16 (503) | 50.368 | 3.691 | **501ms** | **−2700** |
-| v21 | semáforo removido (zero controle) | 49.706 | 326 | 2002ms | −6000 |
+| v21 | semáforo removido | 49.706 | 326 | 2002ms | −6000 |
 | v22 | semáforo bloqueante 128 | 42.949 | 294 | 2002ms | −6000 |
-| v23 (próx) | body exact read + sem blocking | ~0* | ~54k* | ~10-50ms* | >+5000* |
+| v24 | + DecodeBytes fix | 44.800 | 329 | 2002ms | −6000 |
+| v25 | não-bloqueante 1024 + respostas pré-aloc + warmup | ~0* | ~54k* | ~10-50ms* | >+5000* |
 
 ### Comparativo com o melhor concorrente
 
-| Métrica | Best (MXLange C) | v22 (último real) | v23 (esperado*) |
+| Métrica | Best (MXLange C) | v24 (último real) | v25 (esperado*) |
 |:--------|:----------------:|:----------------:|:----------------:|
-| p99 | **0.98ms** | 2001.89ms | **~10-50ms** |
-| Erros HTTP | **0** | 42.949 | **~0** |
-| TP | 24.037 | 131 | ~24.000 |
-| TN | 30.022 | 159 | ~30.000 |
+| p99 | **0.98ms** | 2001.85ms | **~10-50ms** |
+| Erros HTTP | **0** | 44.800 | **~0** |
+| TP | 24.037 | 152 | ~24.000 |
+| TN | 30.022 | 174 | ~30.000 |
 | FP | **0** | 2 | ~10-20 |
-| FN | **0** | 2 | ~10-20 |
-| Failure rate | **0%** | **99.33%** | **~1-2%** |
+| FN | **0** | 1 | ~10-20 |
+| Failure rate | **0%** | **99.28%** | **~1-2%** |
 | Score final | **+6000** | **−6000** | **>+5000** |
 
-*Aguardando submissão v23 (leitura exata do body + semáforo bloqueante)
+*Aguardando submissão v25 (semáforo não-bloqueante 1024 + respostas pré-alocadas + warmup)
 
 ### Causa raiz — três iterações
 
@@ -130,33 +131,38 @@ README.md              # Este arquivo
 **v21 (remoção total)** → 99% failure rate, p99=2002ms:
 - Das 54.100 reqs, apenas 326 processadas
 
-**v22 (semáforo bloqueante 128)** → 99% failure rate, p99=2002ms:
-- Apenas 294 reqs processadas — mesmo resultado de v21
-- O semáforo não era o problema real
+**v24 (DecodeBytes fix + semáforo bloqueante 128)** → 99% failure rate, p99=2002ms:
+- Apenas 329 reqs processadas — mesma classe de v21 sem semáforo
+- O DecodePayload não era o gargalo real
 
-**Bug real (descoberto em v22)**: `DecodePayload` tenta ler até **4096 bytes** do socket
-Unix, mas o proxy enviou apenas **~130 bytes**. O `for n < MaxPayloadSize { r.Read() }`
-bloqueia por **200ms** (ReadTimeout). Esse bug existia desde v16 (codec binário), mas era
-mascarado pelo semáforo não-bloqueante — os 503s rápidos impediam a maioria das requisições
-de alcançar a API. Em v21/v22, sem o 503, toda requisição batia no bug e bloqueava por 200ms.
+**Causa raiz verdadeira: semáforo BLOQUEANTE cria cascade**
+- API semáforo (128) enche → proxy goroutines esperam API (I/O wait)
+- ProxySem slots ocupados por goroutines que esperam API → novas conexões k6 não entram
+- k6 timeout em 2001ms → 82% de erro HTTP
+- p99 em 2002ms porque erros dominam a distribuição de latência
 
-**Correção v23**: `io.ReadAll(r.Body)` + `codec.DecodeBytes(bodyBytes, payload)`:
-- `http.Server` respeita Content-Length → lê exatos ~130 bytes, zero blocking
-- Semáforo bloqueante 128 slots mantido (protege o scheduler)
-- Combinação resolve tanto os 503s quanto o bloqueio de 200ms
+v20 processava 10× mais (3.691 reqs) porque o **semáforo não-bloqueante** com 503 rápido
+libera o proxySem imediatamente. O bloqueante travava tudo.
+
+**Correção v25**: três mudanças juntas:
+1. **Semáforo não-bloqueante 1024**: `select { case sem <- struct{}{}: }` com capacidade
+   1024. Em regime normal (~5 slots usados), nunca enche. Se encher, 503 rápido.
+2. **Respostas pré-alocadas**: 6 variações de JSON pré-computadas (`fraudResponses[6][]byte`),
+   zero serialização no hot path.
+3. **Warmup container**: 48 POSTs antes do teste via curl, aquecendo caches.
 
 ### Lições Aprendidas
 
 | Lição | Descrição |
 |:-----|:----------|
 | ⏱️ **Sempre configurar timeouts HTTP** | `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` e `IdleTimeout` são obrigatórios. |
-| 🚦 **Semáforo bloqueante + body exact read** | Semáforo bloqueante (128) sem o bug do DecodePayload. O semáforo sozinho não resolve — o bloqueio de 200ms no `DecodePayload` travava tudo. |
+| 🚦 **Semáforo não-bloqueante com capacidade folgada** | Bloqueante causa cascade mesmo com DecodeBytes fix. Não-bloqueante 1024 com 180 req/s enche raramente; quando enche, 503 rápido. |
 | 🔄 **Tuning do proxy transport** | `MaxIdleConnsPerHost`, `IdleConnTimeout` e `DialContext.Timeout` são essenciais. |
 | 🧪 **Testar com carga real antes** | Testes unitários não revelam problemas de concorrência ou convoy. |
 | 🖥️ **CPU do proxy é crítica** | proxy passou de 0.05 → 0.10 → 0.15 CPU em múltiplos ajustes. |
 | 📊 **503 é pior que FP/FN no scoring** | 503 tem peso 5 no E (vs 1 do FP, 3 do FN). Melhor processar com latência maior que recusar — desde que fique abaixo dos 2000ms. |
-| 🐛 **io.ReadAll(r.Body) não DecodePayload(r.Body, payload)** | O `http.Server` respeita Content-Length. `DecodePayload` ignorava e lia até 4096 bytes, bloqueando 200ms. `io.ReadAll(r.Body)` + `DecodeBytes()` lê exatamente o que foi enviado. |
-| 🎯 **Nem rejeitar, nem liberar geral — o meio termo é fila** | Retornar 503 (v20) ou remover todo controle (v21) são extremos ruins. Canal bloqueante com 128 slots + body exact read é a combinação correta. |
+| 🐛 **Semáforo bloqueante foi o pior de todos** | v20 (não-bloqueante 16, 503) processou 3.691 reqs. v24 (bloqueante 128 + DecodeBytes) processou 329. O bloqueante é pior que não ter semáforo. A chave é capacidade folgada + não-bloqueante. |
+| 🎯 **Semáforo não-bloqueante 1024 + respostas pré-alocadas + warmup** | Combinação que resolve os problemas de v20-24: não-bloqueante com folga elimina cascade, resposta pronta evita serialização, warmup aquece caches. |
 | 🧹 **Revisar ADRs obsoletos** | ADRs que resolviam problemas de versões anteriores podem virar o próprio problema. Remova ou ajuste quando a stack mudar. |
 
 As decisões arquiteturais estão documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)**.

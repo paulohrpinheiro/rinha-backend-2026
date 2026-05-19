@@ -1486,6 +1486,49 @@ codec.DecodeBytes(bodyBytes, payload)
 
 ---
 
+## ADR-44: Semáforo não-bloqueante 1024 + respostas pré-alocadas + warmup
+
+**Contexto**: v24 (DecodeBytes fix + semáforo bloqueante 128) manteve p99=2002ms e apenas
+329 requisições processadas — virtualmente idêntico ao v22 (sem o fix). O DecodeBytes
+resolvia o blocking read de 200ms, mas o semáforo bloqueante ainda causava cascade:
+
+1. API semáforo (128) enche → API goroutines parkam no canal
+2. Proxy `client.Do` fica esperando API → goroutines do proxy parkam (I/O wait)
+3. ProxySem slots (128) ocupados por goroutines que esperam API
+4. Novas conexões k6 não conseguem proxySem → k6 timeout de 2001ms
+5. **82% de erro HTTP**, p99 = 2001ms
+
+O semáforo bloqueante de 128 era pior que não ter semáforo (v21). Versão v20 (semáforo
+não-bloqueante 16 slots com 503) processava 10× mais requisições porque o 503 rápido
+libera o proxySem imediatamente, sem cascade.
+
+**Decisões**:
+
+1. **Semáforo não-bloqueante 1024**: `select { case sem <- struct{}{}: ... default: 503 }`
+   com capacidade 1024. Em regime normal (180 req/s), ~5-10 slots ocupados — nunca enche.
+   Quando enche (burst extremo), 503 rápido (<1μs) em vez de cascade de 2001ms.
+
+2. **Respostas JSON pré-alocadas**: `fraudResponses[6][]byte` com as 6 variações possíveis
+   (fraud_count 0-5). Elimina `strconv.AppendFloat` e montagem manual no proxy.
+
+3. **Warmup container**: 48 POSTs simulados antes do teste, aquecendo caches de CPU,
+   resolvendo page faults e compilando hot paths do Go runtime.
+
+**Arquivos alterados**:
+- `cmd/proxy/main.go` — proxySem não-bloqueante 1024, fraudResponses, resposta pré-alocada
+- `internal/handler/fraud.go` — semaphore não-bloqueante 1024
+- `scripts/warmup.sh` — novo, script de warmup
+- `docker-compose.yml` — serviço warmup
+- `docker-compose.submission.yml` — serviço warmup
+
+**Consequências**:
+- **503s extremamente raros**: 1024 slots com 180 req/s → ~5 ocupados
+- **Quando ocorrem, rápidos**: 503 em <1μs, sem cascade
+- **Resposta zero alocação**: `w.Write(fraudResponses[fraudCount])` — sem serialização
+- **Warmup**: caches aquecidos para primeira request do teste
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões

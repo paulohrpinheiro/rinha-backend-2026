@@ -1,4 +1,4 @@
-.PHONY: build test bench docker-build docker-push docker-tag-latest docker-up docker-down docker-logs docker-up-submission submission-file clean all
+.PHONY: build test bench docker-build docker-push docker-tag-latest docker-up docker-down docker-logs docker-up-submission submission-file clean all warmup
 
 BINARY_API    := bin/api
 BINARY_PROXY  := bin/proxy
