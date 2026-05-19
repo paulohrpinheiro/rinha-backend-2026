@@ -4,7 +4,7 @@ volumes:
 
 services:
   proxy:
-    image: paulohrpinheiro/rinha-proxy:v16
+    image: paulohrpinheiro/rinha-proxy:v17
     ports:
       - "9999:9999"
     environment:
@@ -28,11 +28,13 @@ services:
 
   api-1:
     hostname: api-1
-    image: paulohrpinheiro/rinha-api:v16
+    image: paulohrpinheiro/rinha-api:v17
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
       - UNIX_SOCKET_DIR=/run/sock
+      - GOGC=off
+      - GOMEMLIMIT=150MiB
     networks:
       - rinha-net
     volumes:
@@ -45,11 +47,13 @@ services:
 
   api-2:
     hostname: api-2
-    image: paulohrpinheiro/rinha-api:v16
+    image: paulohrpinheiro/rinha-api:v17
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
       - UNIX_SOCKET_DIR=/run/sock
+      - GOGC=off
+      - GOMEMLIMIT=150MiB
     networks:
       - rinha-net
     volumes:
