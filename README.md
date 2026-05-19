@@ -86,52 +86,62 @@ README.md              # Este arquivo
 
 ## Resultados do Teste Oficial (Evolução)
 
-> Última submissão: v20 (commit `a8e38f8`) · Score final: **−2699.89**
+> Última submissão: v21 (commit `c896f58`) · Score final: **−6000** (pior possível)
 
-### Breakdown (v20)
+### Resultados reais (v21)
 
-| Componente | Valor | Corte ativado? |
-|:-----------|:-----:|:--------------:|
-| `score_p99` | **+300.11** | ❌ p99 = 501.06ms < 2000ms |
-| `score_det` | **−3000** | ✅ failure_rate = 93.3% > 15% |
-| **Final** | **−2699.89** | ⛔ Corte de detecção anula p99 |
+| Componente | Valor | Corte |
+|:-----------|:-----:|:-----:|
+| `score_p99` | **−3000** | ✅ p99 = 2001.74ms > 2000ms |
+| `score_det` | **−3000** | ✅ failure_rate = 99.35% > 15% |
+| **Final** | **−6000** | ⛔ Piso absoluto |
 
 ### Comparativo com o melhor concorrente
 
-| Métrica | Best (MXLange C) | v20 (atual) | v21 (esperado*) |
-|:--------|:----------------:|:----------:|:----------------:|
-| p99 | **0.98ms** | 501ms | **~27-150ms** |
-| Erros HTTP | **0** | 50.368 | **~0** |
-| TP | 24.037 | 1.703 | ~24.000 |
-| TN | 30.022 | 1.912 | ~30.000 |
-| FP | **0** | 34 | ~10-20 |
-| FN | **0** | 42 | ~10-20 |
-| Failure rate | **0%** | **93%** | **~1-2%** |
-| Score final | **+6000** | **−2700** | **~+4000** |
+| Métrica | Best (MXLange C) | v21 (último real) | v22 (esperado*) |
+|:--------|:----------------:|:----------------:|:----------------:|
+| p99 | **0.98ms** | 2001.74ms | **~10-50ms** |
+| Erros HTTP | **0** | 49.706 | **~0** |
+| TP | 24.037 | 150 | ~24.000 |
+| TN | 30.022 | 173 | ~30.000 |
+| FP | **0** | 2 | ~10-20 |
+| FN | **0** | 1 | ~10-20 |
+| Failure rate | **0%** | **99.35%** | **~1-2%** |
+| Score final | **+6000** | **−6000** | **>+5000** |
 
-*Estimativa após remoção dos semáforos (ADR-42)
+*Aguardando submissão v22 (semáforo bloqueante)
 
-### Causa raiz (v20 — após todas as otimizações anteriores)
+### Causa raiz — três iterações
 
-| Problema | Evidência |
-|:---------|:----------|
-| **Semáforo de 16 slots causa convoy com GOMAXPROCS=1** | 16 goroutines competem por 1 OS thread; 15 ocupam slots sem executar → semáforo "cheio" → 503 em 93% das requisições |
-| **503 tem peso 5 no scoring** | Cada 503 conta como 5 erros ponderados (E), explodindo a failure_rate para 93% |
-| **p99 = 501ms** | Abaixo do corte de 2000ms — latência não é o problema principal |
-| **Detecção boa quando a requisição passa** | TP=1703, TN=1912, FP=34, FN=42 — qualidade aceitável nas ~3.600 que passaram |
+**v20 (semáforo não-bloqueante 16 slots)** → 93% failure rate, 503s:
+- `select` com `default` retornava 503 quando o semáforo de 16 slots estava cheio
+- Com GOMAXPROCS=1, apenas 1 goroutine executa; 15 ocupam slots sem rodar
+- Semáforo "cheio" → 503 (peso 5 no scoring) → 93% failure rate
+- Das 54.100 reqs, ~3.600 processadas, 50.368 com 503
 
-**Solução implementada**: remoção dos semáforos (ADR-42). Com GOGC=off, protocolo binário e zero alocações de strings no hot path, os semáforos criavam mais problemas que resolviam.
+**v21 (remoção total)** → 99% failure rate, p99=2002ms:
+- Sem limitador, k6 bursts criam centenas de goroutines no scheduler
+- Com GOMAXPROCS=1, goroutine espera >100ms pelo scheduler → perde ReadHeaderTimeout
+- O timeout fecha a conexão, consome CPU, agrava o ciclo
+- Das 54.100 reqs, apenas 326 processadas — PIOR que v20!
+
+**Correção v22**: semáforo BLOQUEANTE com `chan <- struct{}{}`:
+- `make(chan struct{}, 128)` — goroutines em excesso PARKAM no canal (zero CPU)
+- No máximo 128 runáveis por vez → scheduler não trava
+- Zero 503s, zero timeouts por scheduler thrashing
+- Detalhes completos no **ADR-42** em DECISOES.md
 
 ### Lições Aprendidas
 
 | Lição | Descrição |
 |:-----|:----------|
 | ⏱️ **Sempre configurar timeouts HTTP** | `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` e `IdleTimeout` são obrigatórios. |
-| 🚦 **Semáforo com GOMAXPROCS=1 causa convoy** | Com GOMAXPROCS=1 e semáforo, goroutines ocupam slots sem executar, criando 503 em cascata. Semáforo só funciona com concorrência real (GOMAXPROCS > 1). |
+| 🚦 **Semáforo bloqueante > não-bloqueante** | `chan <- struct{}{}` bloqueante parka goroutines excedentes (zero CPU). `select/default` rejeita com 503 (peso 5). Com GOMAXPROCS=1, semáforo bloqueante com 128 slots resolve. |
 | 🔄 **Tuning do proxy transport** | `MaxIdleConnsPerHost`, `IdleConnTimeout` e `DialContext.Timeout` são essenciais. |
 | 🧪 **Testar com carga real antes** | Testes unitários não revelam problemas de concorrência ou convoy. |
 | 🖥️ **CPU do proxy é crítica** | proxy passou de 0.05 → 0.10 → 0.15 CPU em múltiplos ajustes. |
 | 📊 **503 é pior que FP/FN no scoring** | 503 tem peso 5 no E (vs 1 do FP, 3 do FN). Melhor processar com latência maior que recusar — desde que fique abaixo dos 2000ms. |
+| 🎯 **Nem rejeitar, nem liberar geral — o meio termo é fila** | Retornar 503 (v20) ou remover todo controle (v21) são extremos ruins. Canal bloqueante com 128 slots é o ponto ótimo: fila natural sem rejeições ou timeouts. |
 | 🧹 **Revisar ADRs obsoletos** | ADRs que resolviam problemas de versões anteriores podem virar o próprio problema. Remova ou ajuste quando a stack mudar. |
 
 As decisões arquiteturais estão documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)**.

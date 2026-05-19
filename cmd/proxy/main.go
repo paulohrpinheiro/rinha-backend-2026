@@ -63,6 +63,11 @@ var encodeBufPool = sync.Pool{
 	New: func() any { return new(bytes.Buffer) },
 }
 
+// proxySem limits concurrent proxy requests via blocking channel.
+// 128 slots × 337μs worst-case = ~43ms max scheduler wait on 0.15 CPU,
+// well under the 100ms ReadHeaderTimeout. No 503 rejection.
+var proxySem = make(chan struct{}, 128)
+
 // RoundRobinProxy handles POST /fraud-score: parses JSON, encodes to binary,
 // forwards to an API, decodes binary response, returns JSON.
 type RoundRobinProxy struct {
@@ -72,10 +77,13 @@ type RoundRobinProxy struct {
 }
 
 func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Acquire blocking semaphore slot (parks goroutine if full).
+	// With GOMAXPROCS=1 and 0.15 CPU, 128 slots × 337μs = ~43ms worst-case
+	// scheduler wait, well under the 100ms ReadHeaderTimeout.
+	proxySem <- struct{}{}
+	defer func() { <-proxySem }()
+
 	// Pick backend via round-robin
-	// No semaphore: with GOGC=off and zero-alloc binary protocol, the GC
-	// thrashing concern is resolved. GOMAXPROCS=1 naturally serializes
-	// goroutines without artificial queuing or 503 convoy problems.
 	idx := p.counter.Add(1) % uint64(len(p.backends))
 	backend := p.backends[idx]
 

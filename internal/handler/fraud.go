@@ -9,6 +9,19 @@ import (
 	"rinha-backend/internal/vector"
 )
 
+// semaphore limits concurrent fraud-score requests via a blocking channel.
+// Unlike the non-blocking semaphore (ADR-16) that returned 503 when full,
+// this one blocks (parks the goroutine) until a slot opens.
+//
+// Blocking is critical under GOMAXPROCS=1: a parked goroutine consumes
+// zero CPU and doesn't compete for the scheduler. Without this limit,
+// k6 bursts create hundreds of runnable goroutines that miss the 100ms
+// ReadHeaderTimeout, cascading into massive timeout errors.
+//
+// 128 slots × 300μs worst-case CPU per slot = ~38ms max scheduler wait
+// (well under ReadHeaderTimeout). Zero requests are rejected.
+var semaphore = make(chan struct{}, 128)
+
 // payloadPool reuses codec.Payload structs and their internal buffers
 // (rawBuf, KnownMerchants slice) across requests, avoiding allocations.
 var payloadPool = sync.Pool{
@@ -41,11 +54,14 @@ func (h *FraudHandler) Ready(w http.ResponseWriter, r *http.Request) {
 // FraudScore handles POST /fraud-score — processes a transaction and
 // returns the fraud decision using binary codec (zero JSON allocations).
 func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
+	// Acquire blocking semaphore slot (parks goroutine if full — no 503).
+	// With GOMAXPROCS=1, a parked goroutine consumes zero CPU. The channel
+	// acts as both queue and concurrency limiter. At 128 slots, worst-case
+	// scheduler wait is ~38ms, well under the 100ms ReadHeaderTimeout.
+	semaphore <- struct{}{}
+	defer func() { <-semaphore }()
+
 	// Decode binary payload directly (no json.Unmarshal, no allocations)
-	// Note: no semaphore — with GOGC=off, GOMEMLIMIT=150MiB, and zero-alloc
-	// binary protocol, the original GC thrashing concern is resolved. The Go
-	// scheduler with GOMAXPROCS=1 naturally serializes goroutines without
-	// artificial queuing, eliminating the 503 convoy problem.
 	payload := payloadPool.Get().(*codec.Payload)
 	defer payloadPool.Put(payload)
 
