@@ -73,27 +73,8 @@ services:
           cpus: "0.425"
           memory: "165MB"
 
-  warmup:
-    image: curlimages/curl:8.8.0
-    platform: linux/amd64
-    entrypoint: ["/bin/sh", "/warmup.sh"]
-    environment:
-      - BASE_URL=http://proxy:9999
-      - READY_RETRIES=120
-      - READY_SLEEP=0.25
-      - WARMUP_ROUNDS=48
-    volumes:
-      - ./scripts/warmup.sh:/warmup.sh:ro
-    depends_on:
-      - proxy
-    networks:
-      - rinha-net
-    deploy:
-      resources:
-        limits:
-          cpus: "0.04"
-          memory: "12M"
-    restart: "no"
+  # warmup removed: warmup now runs inline in the API binary after loading the IVF index
+  # (see handler.Warmup() in internal/handler/fraud.go)
 
 networks:
   rinha-net:

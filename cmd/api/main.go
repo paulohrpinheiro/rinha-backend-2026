@@ -98,6 +98,7 @@ func main() {
 	}
 
 	h := handler.New(idx, norm)
+	h.Warmup()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ready", h.Ready)
