@@ -109,7 +109,7 @@ README.md              # Este arquivo
 | v25 | não-bloqueante 1024 + respostas pré-aloc + warmup | ~0* | ~54k* | ~10-50ms* | >+5000* |
 | v26 | v25 + K-means corrigido + nprobe=3 | 0** | 5000** | 97ms** | — |
 
-**Benchmark local v26 (commit c751a1e): 5000 reqs, concurrency 20, zero falhas**
+*Aguardando submissao v25. **Benchmark local v26 (commit c751a1e): 5000 reqs, concurrency 20, zero falhas**
 
 ### Comparativo com o melhor concorrente
 
