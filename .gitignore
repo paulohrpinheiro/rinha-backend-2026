@@ -3,3 +3,5 @@ proxy
 bin/
 lastResult*.json
 bestResult.json
+resources/index.bin
+cmd/diag/diag

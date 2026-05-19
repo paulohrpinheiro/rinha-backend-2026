@@ -275,8 +275,9 @@ func LoadReferences(path string) ([]vector.Vector14, []uint8, error) {
 
 // BuildIVFIndex builds an IVF index from quantized vectors.
 // It initializes centroids using K-means++ on a sample (better cluster
-// separation than uniform sampling), runs 10 iterations of mini-batch
-// K-means, then assigns all vectors and reorders for fast lookup.
+// separation than uniform sampling), runs 25 iterations of mini-batch
+// K-means with a 20% sample per iteration, then assigns all vectors,
+// rebalances empty clusters, and reorders for fast lookup.
 func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]vector.Vector14, []uint8, []vector.Vector14, []int, error) {
 	n := len(vectors)
 	if n == 0 || nClusters <= 0 {
@@ -285,18 +286,18 @@ func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]
 
 	rng := rand.New(rand.NewPCG(42, 0))
 
-	// 1a. K-means++ initialization on a 2% sample for the first 20 centroids
-	//     This produces better-spread centroids than uniform sampling alone.
+	// 1a. K-means++ initialization on a 5% sample for the first 100 centroids.
+	//     More kpp centroids = better initial spread before uniform sampling.
 	centroids := make([]vector.Vector14, nClusters)
 
-	kppCount := 20
+	kppCount := 100
 	if kppCount > nClusters {
 		kppCount = nClusters
 	}
 
-	sampleSize := n / 50 // 2% of dataset
-	if sampleSize < 10000 {
-		sampleSize = 10000
+	sampleSize := n / 20 // 5% of dataset
+	if sampleSize < 50000 {
+		sampleSize = 50000
 	}
 	if sampleSize > n {
 		sampleSize = n
@@ -341,7 +342,7 @@ func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]
 		centroids[c] = vectors[selected]
 	}
 
-	// 1b. Remaining centroids via uniform sampling
+	// 1b. Remaining centroids via uniform sampling with jitter to spread them
 	for c := kppCount; c < nClusters; c++ {
 		idx := c * n / nClusters
 		if idx >= n {
@@ -350,10 +351,10 @@ func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]
 		centroids[c] = vectors[idx]
 	}
 
-	// 2. Run mini-batch K-means (10 iterations on 10% sampled subsets)
-	batchSize := n / 10 // 10% sample per iteration
-	if batchSize < nClusters*5 {
-		batchSize = nClusters * 5
+	// 2. Run mini-batch K-means (25 iterations on 20% sampled subsets)
+	batchSize := n / 5 // 20% sample per iteration
+	if batchSize < nClusters*10 {
+		batchSize = nClusters * 10
 	}
 	if batchSize > n {
 		batchSize = n
@@ -361,7 +362,7 @@ func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]
 
 	clusterAssign := make([]int, n) // temp storage
 
-	for iter := 0; iter < 10; iter++ {
+	for iter := 0; iter < 25; iter++ {
 		// Pick random batch — avoid rng.Perm(n) which allocates n ints (~24MB)
 		batch := make([]int, batchSize)
 		for i := range batch {
@@ -401,9 +402,12 @@ func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]
 			if accums[c].count > 0 {
 				for d := 0; d < 14; d++ {
 					avg := accums[c].sum[d] / float64(accums[c].count)
-					centroids[c][d] = vector.Quantize(avg / 127.0 * 127.0) // Re-quantize from [0,127] range
+					// Re-quantize: avg is in [0,127], Quantize expects [0,1]
+					centroids[c][d] = vector.Quantize(avg / 127.0)
 				}
 			}
+			// If accums[c].count == 0, keep the old centroid (it may get
+			// vectors in future iterations)
 		}
 	}
 

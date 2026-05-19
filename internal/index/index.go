@@ -32,64 +32,47 @@ func NewIVFIndex(vectors []vector.Vector14, labels []uint8, centroids []vector.V
 
 // Search finds the 5 nearest neighbors of query in the IVF index.
 //
-// Optimization (early exit, ADR-37): searches only the nearest cluster
-// (~3000 vectors) if it contains at least 5 vectors. Falls back to a
-// second cluster scan only when the first has fewer than 5. This halves
-// the per-request work in the common case (~84μs → ~42μs), reducing
-// CPU contention and improving throughput under load.
-//
-// The recall impact is minimal: with 1000 clusters and 3M vectors,
-// clusters average ~3000 vectors — queries near cluster boundaries
-// may lose 1-2 borderline neighbors, but the 0.6 threshold absorbs
-// these small variations.
+// Searches up to nprobe (3) nearest clusters, capped at maxScanPerCluster
+// (5000) vectors each. This bounds worst-case latency to ~350µs even when
+// the index has degenerate clusters (e.g., a cluster with 1.27M vectors
+// due to incomplete K-means convergence). The recall impact is minimal:
+// with nprobe=3, the true nearest neighbors are almost always in the top
+// 3 clusters. The per-cluster cap only affects queries whose nearest
+// cluster is pathologically large, which happens only with a broken index.
 func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) {
+	const (
+		nprobe              = 3
+		maxScanPerCluster   = 5000
+	)
+
 	if idx.nClusters == 0 {
 		return 0, errors.New("empty index")
 	}
 
-	// 1. Find the nearest centroid
-	bestC := 0
-	bestD := int32(math.MaxInt32)
+	// 1. Find the nprobe nearest centroids (partial selection sort)
+	type centroidDist struct {
+		id   int
+		dist int32
+	}
+	nearest := [nprobe]centroidDist{
+		{dist: math.MaxInt32},
+		{dist: math.MaxInt32},
+		{dist: math.MaxInt32},
+	}
+
 	for c := 0; c < idx.nClusters; c++ {
 		d := vector.ManhattanDistance(query, &idx.Centroids[c])
-		if d < bestD {
-			bestD = d
-			bestC = c
+		if d < nearest[nprobe-1].dist {
+			pos := nprobe - 1
+			for pos > 0 && d < nearest[pos-1].dist {
+				nearest[pos] = nearest[pos-1]
+				pos--
+			}
+			nearest[pos] = centroidDist{id: c, dist: d}
 		}
 	}
 
-	// 2. Collect candidate ranges — start with nearest cluster only
-	type clusterRange struct{ start, end int }
-	ranges := make([]clusterRange, 0, 2)
-
-	start, end := idx.Offsets[bestC], idx.Offsets[bestC+1]
-	firstSize := end - start
-	ranges = append(ranges, clusterRange{start, end})
-
-	// Only search second cluster if the first has fewer than 5 vectors
-	// (edge case: very small clusters near the end of the offset list)
-	if firstSize < 5 {
-		secondBestC := -1
-		secondBestD := int32(math.MaxInt32)
-		for c := 0; c < idx.nClusters; c++ {
-			if c == bestC {
-				continue
-			}
-			d := vector.ManhattanDistance(query, &idx.Centroids[c])
-			if d < secondBestD {
-				secondBestD = d
-				secondBestC = c
-			}
-		}
-		if secondBestC >= 0 {
-			ranges = append(ranges, clusterRange{
-				start: idx.Offsets[secondBestC],
-				end:   idx.Offsets[secondBestC+1],
-			})
-		}
-	}
-
-	// 3. Search top-5 nearest neighbors within the candidate ranges
+	// 2. Search top-5 nearest neighbors within the candidate clusters
 	type neighbor struct {
 		dist  int32
 		label uint8
@@ -102,11 +85,23 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 		{dist: math.MaxInt32},
 	}
 
-	for _, r := range ranges {
-		for i := r.start; i < r.end; i++ {
+	for _, nc := range nearest {
+		if nc.id < 0 || nc.dist == math.MaxInt32 {
+			continue
+		}
+		start := idx.Offsets[nc.id]
+		end := idx.Offsets[nc.id+1]
+		if start >= end {
+			continue
+		}
+		// Cap scan to maxScanPerCluster vectors
+		stop := start + maxScanPerCluster
+		if stop > end {
+			stop = end
+		}
+		for i := start; i < stop; i++ {
 			dist := vector.ManhattanDistance(query, &idx.Vectors[i])
 
-			// Insert into top5 if better than worst
 			if dist < top5[4].dist {
 				pos := 4
 				for pos > 0 && dist < top5[pos-1].dist {
@@ -118,7 +113,7 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 		}
 	}
 
-	// 4. Count frauds (label == 1)
+	// 3. Count frauds (label == 1)
 	fraudCount = 0
 	for _, n := range top5 {
 		if n.label == 1 {
