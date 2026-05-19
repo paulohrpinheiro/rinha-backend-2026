@@ -1,4 +1,4 @@
-.PHONY: build test bench docker-build docker-push docker-tag-latest docker-up docker-down docker-logs docker-up-submission submission-file clean all warmup
+.PHONY: build test bench bench-go bench-load docker-build docker-push docker-tag-latest docker-up docker-down docker-logs docker-up-submission submission-file clean all warmup
 
 BINARY_API    := bin/api
 BINARY_PROXY  := bin/proxy
@@ -18,8 +18,16 @@ build:
 test:
 	go test ./... -v
 
-bench:
+bench: bench-go bench-load
+
+bench-go:
 	go test ./... -bench=. -benchmem
+
+bench-load:
+	@echo "Running load benchmark against http://localhost:9999"
+	@echo "Make sure 'docker compose up -d' is running first."
+	@echo ""
+	scripts/bench.sh http://localhost:9999 5000 20
 
 docker-build:
 	docker build -t $(IMAGE_NAME_API):$(VERSION) -f Dockerfile.api .
