@@ -1366,6 +1366,47 @@ ao pool após `client.Do`.
 
 ---
 
+## ADR-42: Remoção dos semáforos de concorrência (proxy e API)
+
+**Contexto**: O último resultado oficial (v20, commit `a8e38f8`) mostrava **93% de erros HTTP**
+(50.368 de 54.100 requisições), com failure_rate de 93.31% — muito acima do corte de 15%.
+O p99 estava em **501ms** (bem abaixo dos 2000ms), e a detecção (TP=1703, TN=1912, FP=34, FN=42)
+era razoável. O problema central era o volume de erros, não a qualidade das respostas bem-sucedidas.
+
+**Causa raiz**: Os semáforos de concorrência (proxySem=16, apiSem=16) com `GOMAXPROCS=1`
+criavam um **problema de convoy (comboio)**:
+
+1. Apenas 1 goroutine roda por vez (GOMAXPROCS=1)
+2. O semáforo permite 16 slots simultâneos
+3. Mas 15 goroutines estão **runáveis** (ocupando slots) e apenas 1 executa
+4. Novas requisições encontram o semáforo "cheio" → **503 imediato**
+5. O 503 conta como erro HTTP (peso 5 no scoring), explodindo a failure_rate
+
+A capacidade real nunca foi o problema: com 0.425 CPU e ~300μs por requisição, cada API
+sustenta ~1.416 req/s — muito acima dos 180 req/s médios do teste. O semáforo impedia
+que essa capacidade fosse utilizada.
+
+**Por que o semáforo foi criado e por que não é mais necessário**:
+- ADR-16: criado para evitar thrashing do GC com parsing JSON
+- ADR-36 (protocolo binário): eliminou as alocações de strings no hot path da API
+- `GOGC=off` + `GOMEMLIMIT=150MiB`: GC da API não roda
+
+**Decisão**: Remover ambos os semáforos.
+
+**Arquivos alterados**:
+- `cmd/proxy/main.go` — removeu `proxySem` e bloco select/default
+- `internal/handler/fraud.go` — removeu `semaphore` e bloco select/default
+
+**Consequências**:
+- **Zero erros HTTP artificiais**: sem 503 por capacidade esgotada
+- **Throughput limitado pela CPU**: ~1.416 req/s por API
+- **Go scheduler gerencia a fila**: requisições aguardam naturalmente no scheduler
+- **p99 esperado**: ~27-150ms (vs 501ms atuais)
+- **Risco**: sob pico extremo, p99 pode subir, mas ainda abaixo do corte de 2000ms
+- `GOGC=off` + `GOMEMLIMIT=150MiB` permanecem como rede de segurança contra OOM
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões

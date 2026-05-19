@@ -84,51 +84,55 @@ README.md              # Este arquivo
 
 ---
 
-## Resultados do Teste Oficial
+## Resultados do Teste Oficial (Evolução)
 
-> Última submissão: v10 (commit `6b95df7`) · Score final: **−6000** (pior possível)
+> Última submissão: v20 (commit `a8e38f8`) · Score final: **−2699.89**
 
-### Breakdown
+### Breakdown (v20)
 
 | Componente | Valor | Corte ativado? |
 |:-----------|:-----:|:--------------:|
-| `score_p99` | **−3000** | ✅ p99 = 2002.25ms > 2000ms |
-| `score_det` | **−3000** | ✅ failure_rate = 100% > 15% |
-| **Final** | **−6000** | ⛔ Piso absoluto |
+| `score_p99` | **+300.11** | ❌ p99 = 501.06ms < 2000ms |
+| `score_det` | **−3000** | ✅ failure_rate = 93.3% > 15% |
+| **Final** | **−2699.89** | ⛔ Corte de detecção anula p99 |
 
 ### Comparativo com o melhor concorrente
 
-| Métrica | Nossos resultados (v9/v10) | Best (MXLange C) |
-|:--------|:--------------------------:|:----------------:|
-| p99 | 2002.20 − 2002.25ms | **0.98ms** |
-| Erros HTTP | 13.858 − 13.973 | **0** |
-| TP | 0 | 24.037 |
-| TN | 0 | 30.022 |
-| FP | 0 | **0** |
-| FN | 0 | **0** |
-| Failure rate | **100%** | **0%** |
-| Score final | **−6000** | **+6000** |
+| Métrica | Best (MXLange C) | v20 (atual) | v21 (esperado*) |
+|:--------|:----------------:|:----------:|:----------------:|
+| p99 | **0.98ms** | 501ms | **~27-150ms** |
+| Erros HTTP | **0** | 50.368 | **~0** |
+| TP | 24.037 | 1.703 | ~24.000 |
+| TN | 30.022 | 1.912 | ~30.000 |
+| FP | **0** | 34 | ~10-20 |
+| FN | **0** | 42 | ~10-20 |
+| Failure rate | **0%** | **93%** | **~1-2%** |
+| Score final | **+6000** | **−2700** | **~+4000** |
 
-### Causa raiz
+*Estimativa após remoção dos semáforos (ADR-42)
+
+### Causa raiz (v20 — após todas as otimizações anteriores)
 
 | Problema | Evidência |
 |:---------|:----------|
-| **Proxy com 0.05 CPU insuficiente** | httputil.ReverseProxy consome ~0.5ms/req; com 0.05 CPU, throughput máximo ~100 req/s, abaixo dos 180 req/s necessários |
-| **100% failure rate** | Nenhuma requisição processada com sucesso — todas as respostas foram erros ou timeouts |
-| **p99 = 2002ms** | Exatamente no timeout do k6 — requisições nunca chegam à API |
+| **Semáforo de 16 slots causa convoy com GOMAXPROCS=1** | 16 goroutines competem por 1 OS thread; 15 ocupam slots sem executar → semáforo "cheio" → 503 em 93% das requisições |
+| **503 tem peso 5 no scoring** | Cada 503 conta como 5 erros ponderados (E), explodindo a failure_rate para 93% |
+| **p99 = 501ms** | Abaixo do corte de 2000ms — latência não é o problema principal |
+| **Detecção boa quando a requisição passa** | TP=1703, TN=1912, FP=34, FN=42 — qualidade aceitável nas ~3.600 que passaram |
 
-A distribuição de CPU foi ajustada no **ADR-28** (proxy 0.05→0.10, APIs 0.475→0.45).
+**Solução implementada**: remoção dos semáforos (ADR-42). Com GOGC=off, protocolo binário e zero alocações de strings no hot path, os semáforos criavam mais problemas que resolviam.
 
 ### Lições Aprendidas
 
 | Lição | Descrição |
 |:-----|:----------|
-| ⏱️ **Sempre configurar timeouts HTTP** | `http.Server` sem timeouts é uma bomba-relógio sob carga. `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` e `IdleTimeout` são obrigatórios. |
-| 🚦 **Limitar concorrência** | Um semáforo simples (`chan struct{}`) evita que uma rajada de requisições exploda o número de goroutines e paralise o GC. |
-| 🔄 **Tuning do proxy transport** | `MaxIdleConnsPerHost`, `IdleConnTimeout` e `DialContext.Timeout` no `http.Transport` do proxy evitam criação excessiva de conexões TCP. |
-| 📊 **503 imediato > timeout de 2s** | Responder com HTTP 503 ("too many requests") em <1ms é muito melhor que deixar a conexão aberta até o timeout do cliente. |
-| 🧪 **Testar com carga real antes** | Testes unitários não revelam problemas de concorrência. Um teste de carga com k6 (mesmo que reduzido) teria detectado o problema. |
-| 🖥️ **CPU do proxy é crítica** | Com 0.05 CPU e httputil.ReverseProxy, o proxy é o gargalo principal — não a API. |
+| ⏱️ **Sempre configurar timeouts HTTP** | `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` e `IdleTimeout` são obrigatórios. |
+| 🚦 **Semáforo com GOMAXPROCS=1 causa convoy** | Com GOMAXPROCS=1 e semáforo, goroutines ocupam slots sem executar, criando 503 em cascata. Semáforo só funciona com concorrência real (GOMAXPROCS > 1). |
+| 🔄 **Tuning do proxy transport** | `MaxIdleConnsPerHost`, `IdleConnTimeout` e `DialContext.Timeout` são essenciais. |
+| 🧪 **Testar com carga real antes** | Testes unitários não revelam problemas de concorrência ou convoy. |
+| 🖥️ **CPU do proxy é crítica** | proxy passou de 0.05 → 0.10 → 0.15 CPU em múltiplos ajustes. |
+| 📊 **503 é pior que FP/FN no scoring** | 503 tem peso 5 no E (vs 1 do FP, 3 do FN). Melhor processar com latência maior que recusar — desde que fique abaixo dos 2000ms. |
+| 🧹 **Revisar ADRs obsoletos** | ADRs que resolviam problemas de versões anteriores podem virar o próprio problema. Remova ou ajuste quando a stack mudar. |
 
 As decisões arquiteturais estão documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)**.
 

@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"io"
 	"net/http"
 	"sync"
 
@@ -9,13 +8,6 @@ import (
 	"rinha-backend/internal/index"
 	"rinha-backend/internal/vector"
 )
-
-// semaphore limits concurrent fraud-score requests to prevent
-// goroutine explosion and Go scheduler thrashing under high load.
-// With GOMAXPROCS=1 and 0.45 CPU, 64 goroutines caused ~20% scheduler
-// overhead (context switching). 16 slots keeps ~4.8ms of simultaneous
-// CPU work, well within budget, and eliminates scheduling contention.
-var semaphore = make(chan struct{}, 16)
 
 // payloadPool reuses codec.Payload structs and their internal buffers
 // (rawBuf, KnownMerchants slice) across requests, avoiding allocations.
@@ -49,18 +41,11 @@ func (h *FraudHandler) Ready(w http.ResponseWriter, r *http.Request) {
 // FraudScore handles POST /fraud-score — processes a transaction and
 // returns the fraud decision using binary codec (zero JSON allocations).
 func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
-	// 1. Acquire semaphore slot; return 503 immediately if at capacity
-	select {
-	case semaphore <- struct{}{}:
-		defer func() { <-semaphore }()
-	default:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`{"error":"too many requests"}`))
-		return
-	}
-
-	// 2. Decode binary payload directly (no json.Unmarshal, no allocations)
+	// Decode binary payload directly (no json.Unmarshal, no allocations)
+	// Note: no semaphore — with GOGC=off, GOMEMLIMIT=150MiB, and zero-alloc
+	// binary protocol, the original GC thrashing concern is resolved. The Go
+	// scheduler with GOMAXPROCS=1 naturally serializes goroutines without
+	// artificial queuing, eliminating the 503 convoy problem.
 	payload := payloadPool.Get().(*codec.Payload)
 	defer payloadPool.Put(payload)
 
@@ -104,10 +89,4 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 		// If write fails, connection is broken anyway — nothing to do
 		return
 	}
-}
-
-// discardBody reads and discards any remaining bytes from r.Body.
-// Useful when returning early due to error, to allow connection reuse.
-func discardBody(r *http.Request) {
-	io.Copy(io.Discard, r.Body)
 }

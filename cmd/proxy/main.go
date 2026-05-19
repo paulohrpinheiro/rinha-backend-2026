@@ -63,11 +63,6 @@ var encodeBufPool = sync.Pool{
 	New: func() any { return new(bytes.Buffer) },
 }
 
-// proxySem limits concurrent proxy requests.
-// Reduced from 64 to 16: with 0.10 CPU, 64 goroutines caused
-// scheduling overhead; 16 is sufficient for the proxy workload.
-var proxySem = make(chan struct{}, 16)
-
 // RoundRobinProxy handles POST /fraud-score: parses JSON, encodes to binary,
 // forwards to an API, decodes binary response, returns JSON.
 type RoundRobinProxy struct {
@@ -77,18 +72,10 @@ type RoundRobinProxy struct {
 }
 
 func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// 1. Acquire semaphore slot
-	select {
-	case proxySem <- struct{}{}:
-		defer func() { <-proxySem }()
-	default:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`{"error":"too many requests"}`))
-		return
-	}
-
-	// 2. Pick backend via round-robin
+	// Pick backend via round-robin
+	// No semaphore: with GOGC=off and zero-alloc binary protocol, the GC
+	// thrashing concern is resolved. GOMAXPROCS=1 naturally serializes
+	// goroutines without artificial queuing or 503 convoy problems.
 	idx := p.counter.Add(1) % uint64(len(p.backends))
 	backend := p.backends[idx]
 
