@@ -1,4 +1,5 @@
 // API server for fraud detection using IVF vector search.
+// Receives binary-encoded payloads from the proxy via Unix socket.
 package main
 
 import (
@@ -14,18 +15,14 @@ import (
 	"rinha-backend/internal/handler"
 	"rinha-backend/internal/index"
 	"rinha-backend/internal/loader"
+	"rinha-backend/internal/vector"
 )
 
 func main() {
-	// Pin GOMAXPROCS to 1 to match the 0.475 CPU container limit.
-	// The default GOMAXPROCS matches the host's physical CPUs, which
-	// can be much higher than the container quota, causing thread
-	// thrashing and excessive Go scheduler overhead.
+	// Pin GOMAXPROCS to 1 to match the 0.45 CPU container limit.
 	runtime.GOMAXPROCS(1)
 
 	// If -build-index flag is set, pre-build the IVF index to a file and exit.
-	// This is used during Docker build to produce a ready-to-load index,
-	// reducing startup time from ~90s to <1s.
 	buildIndexPath := flag.String("build-index", "", "Pre-build IVF index to file and exit")
 	flag.Parse()
 
@@ -34,7 +31,7 @@ func main() {
 		return
 	}
 
-	// File paths (resources are in the same directory as the binary)
+	// File paths
 	resourcesDir := "resources"
 	if dir := os.Getenv("RESOURCES_DIR"); dir != "" {
 		resourcesDir = dir
@@ -46,7 +43,7 @@ func main() {
 	}
 
 	log.Println("Loading normalization constants...")
-	norm, err := loader.LoadNormalization(resourcesDir + "/normalization.json")
+	normModel, err := loader.LoadNormalization(resourcesDir + "/normalization.json")
 	if err != nil {
 		log.Fatalf("Failed to load normalization.json: %v", err)
 	}
@@ -58,6 +55,18 @@ func main() {
 		log.Fatalf("Failed to load mcc_risk.json: %v", err)
 	}
 	log.Println("  OK")
+
+	// Build NormalizationConfig (used directly by vector.Normalize)
+	norm := &vector.NormalizationConfig{
+		MaxAmount:            normModel.MaxAmount,
+		MaxInstallments:      normModel.MaxInstallments,
+		AmountVsAvgRatio:     normModel.AmountVsAvgRatio,
+		MaxMinutes:           normModel.MaxMinutes,
+		MaxKm:                normModel.MaxKm,
+		MaxTxCount24h:        normModel.MaxTxCount24h,
+		MaxMerchantAvgAmount: normModel.MaxMerchantAvgAmount,
+		MCCRisk:              mccRisk,
+	}
 
 	// Try loading pre-built index first (fast path)
 	var idx *index.IVFIndex
@@ -82,14 +91,13 @@ func main() {
 		}
 		log.Println("  OK")
 
-		// Free original arrays (help GC)
 		vectors = nil
 		labels = nil
 
 		idx = index.NewIVFIndex(reorderedVecs, reorderedLabels, centroids, offsets)
 	}
 
-	h := handler.New(idx, norm, mccRisk)
+	h := handler.New(idx, norm)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ready", h.Ready)
@@ -113,27 +121,21 @@ func main() {
 		}
 	}()
 
-	// Start Unix socket listener for inter-service communication (proxy↔API)
-	// This eliminates TCP/IP overhead between proxy and APIs, reducing latency
-	// from ~100μs (TCP localhost) to <10μs (Unix socket).
+	// Start Unix socket listener for binary protocol (proxy↔API)
 	unixSocketDir := os.Getenv("UNIX_SOCKET_DIR")
 	if unixSocketDir == "" {
 		unixSocketDir = "/run/sock"
 	}
 
-	// Use hostname as socket name so each API instance has a unique socket
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "api"
 	}
 	socketPath := filepath.Join(unixSocketDir, hostname+".sock")
 
-	// Remove stale socket file (in case of unclean shutdown)
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
 		log.Printf("Warning: could not remove stale socket %s: %v", socketPath, err)
 	}
-
-	// Ensure socket directory exists
 	if err := os.MkdirAll(unixSocketDir, 0755); err != nil {
 		log.Fatalf("Failed to create socket directory %s: %v", unixSocketDir, err)
 	}
@@ -142,8 +144,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create Unix socket %s: %v", socketPath, err)
 	}
-
-	// Make socket accessible to the proxy container (different user/group)
 	if err := os.Chmod(socketPath, 0777); err != nil {
 		log.Printf("Warning: could not chmod socket %s: %v", socketPath, err)
 	}
@@ -155,12 +155,10 @@ func main() {
 		}
 	}()
 
-	// Block main goroutine
 	select {}
 }
 
 // buildIndex loads the dataset, builds the IVF index, and saves it to a binary file.
-// This is intended to be called during Docker build for fast startup at runtime.
 func buildIndex(path string) {
 	resourcesDir := "resources"
 	if dir := os.Getenv("RESOURCES_DIR"); dir != "" {
@@ -196,7 +194,6 @@ func buildIndex(path string) {
 	}
 	log.Println("  OK")
 
-	// Free original arrays (help GC)
 	vectors = nil
 	labels = nil
 

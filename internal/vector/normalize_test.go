@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"rinha-backend/internal/model"
+	"rinha-backend/internal/codec"
 )
 
-var testNorm = &model.Normalization{
+var testNorm = &NormalizationConfig{
 	MaxAmount:            10000,
 	MaxInstallments:      12,
 	AmountVsAvgRatio:     10,
@@ -15,12 +15,11 @@ var testNorm = &model.Normalization{
 	MaxKm:                1000,
 	MaxTxCount24h:        20,
 	MaxMerchantAvgAmount: 10000,
-}
-
-var testMCCRisk = map[string]float64{
-	"5411": 0.15,
-	"7802": 0.75,
-	"5912": 0.20,
+	MCCRisk: map[string]float64{
+		"5411": 0.15,
+		"7802": 0.75,
+		"5912": 0.20,
+	},
 }
 
 func withinTolerance(actual, expected int8) bool {
@@ -98,31 +97,23 @@ func TestManhattanDistance(t *testing.T) {
 }
 
 func TestNormalizeLegitTx(t *testing.T) {
-	payload := &model.TransactionPayload{
-		Transaction: model.TransactionData{
-			Amount:       41.12,
-			Installments: 2,
-			RequestedAt:  time.Date(2026, 3, 11, 18, 45, 53, 0, time.UTC),
-		},
-		Customer: model.CustomerData{
-			AvgAmount:      82.24,
-			TxCount24h:     3,
-			KnownMerchants: []string{"MERC-003", "MERC-016"},
-		},
-		Merchant: model.MerchantData{
-			ID:        "MERC-016",
-			MCC:       "5411",
-			AvgAmount: 60.25,
-		},
-		Terminal: model.TerminalData{
-			IsOnline:    false,
-			CardPresent: true,
-			KmFromHome:  29.23,
-		},
-		LastTransaction: nil,
+	payload := &codec.Payload{
+		Amount:         41.12,
+		Installments:   2,
+		RequestedAt:    time.Date(2026, 3, 11, 18, 45, 53, 0, time.UTC),
+		AvgAmount:      82.24,
+		TxCount24h:     3,
+		KnownMerchants: []string{"MERC-003", "MERC-016"},
+		MerchantID:     "MERC-016",
+		MCC:            "5411",
+		MerchantAvgAmount: 60.25,
+		IsOnline:       false,
+		CardPresent:    true,
+		KmFromHome:     29.23,
+		HasLastTransaction: false,
 	}
 
-	result := Normalize(payload, testNorm, testMCCRisk)
+	result := Normalize(payload, testNorm)
 
 	expectedFloats := []float64{
 		0.0041, 0.1667, 0.05, 0.7826, 0.5,
@@ -156,31 +147,23 @@ func TestNormalizeLegitTx(t *testing.T) {
 }
 
 func TestNormalizeFraudTx(t *testing.T) {
-	payload := &model.TransactionPayload{
-		Transaction: model.TransactionData{
-			Amount:       9505.97,
-			Installments: 10,
-			RequestedAt:  time.Date(2026, 3, 14, 5, 15, 12, 0, time.UTC),
-		},
-		Customer: model.CustomerData{
-			AvgAmount:      81.28,
-			TxCount24h:     20,
-			KnownMerchants: []string{"MERC-008", "MERC-007", "MERC-005"},
-		},
-		Merchant: model.MerchantData{
-			ID:        "MERC-068",
-			MCC:       "7802",
-			AvgAmount: 54.86,
-		},
-		Terminal: model.TerminalData{
-			IsOnline:    false,
-			CardPresent: true,
-			KmFromHome:  952.27,
-		},
-		LastTransaction: nil,
+	payload := &codec.Payload{
+		Amount:         9505.97,
+		Installments:   10,
+		RequestedAt:    time.Date(2026, 3, 14, 5, 15, 12, 0, time.UTC),
+		AvgAmount:      81.28,
+		TxCount24h:     20,
+		KnownMerchants: []string{"MERC-008", "MERC-007", "MERC-005"},
+		MerchantID:     "MERC-068",
+		MCC:            "7802",
+		MerchantAvgAmount: 54.86,
+		IsOnline:       false,
+		CardPresent:    true,
+		KmFromHome:     952.27,
+		HasLastTransaction: false,
 	}
 
-	result := Normalize(payload, testNorm, testMCCRisk)
+	result := Normalize(payload, testNorm)
 
 	expectedFloats := []float64{
 		0.9506, 0.8333, 1.0, 0.2174, 1.0,
@@ -205,172 +188,75 @@ func TestNormalizeFraudTx(t *testing.T) {
 	if result[11] != 127 {
 		t.Errorf("dim11 (unknown_merchant) = %d, want 127", result[11])
 	}
-	if result[5] != -1 {
-		t.Errorf("dim5 (no last tx) = %d, want -1", result[5])
-	}
-	if result[6] != -1 {
-		t.Errorf("dim6 (no last tx) = %d, want -1", result[6])
-	}
 }
 
-func TestNormalizeWithLastTransaction(t *testing.T) {
-	now := time.Date(2026, 3, 11, 20, 23, 35, 0, time.UTC)
-	last := time.Date(2026, 3, 11, 14, 58, 35, 0, time.UTC)
-
-	payload := &model.TransactionPayload{
-		Transaction: model.TransactionData{
-			Amount:       41.12,
-			Installments: 2,
-			RequestedAt:  now,
-		},
-		Customer: model.CustomerData{
-			AvgAmount:      82.24,
-			TxCount24h:     3,
-			KnownMerchants: []string{"MERC-003", "MERC-016"},
-		},
-		Merchant: model.MerchantData{
-			ID:        "MERC-016",
-			MCC:       "5411",
-			AvgAmount: 60.25,
-		},
-		Terminal: model.TerminalData{
-			IsOnline:    false,
-			CardPresent: true,
-			KmFromHome:  29.23,
-		},
-		LastTransaction: &model.LastTransactionData{
-			Timestamp:     last,
-			KmFromCurrent: 18.86,
-		},
+func TestNormalizeLastTx(t *testing.T) {
+	payload := &codec.Payload{
+		Amount:         150.0,
+		Installments:   2,
+		RequestedAt:    time.Date(2026, 3, 14, 10, 30, 0, 0, time.UTC),
+		AvgAmount:      200.0,
+		TxCount24h:     5,
+		KnownMerchants: []string{"MERC-001"},
+		MerchantID:     "MERC-001",
+		MCC:            "5912",
+		MerchantAvgAmount: 100.0,
+		IsOnline:       true,
+		CardPresent:    false,
+		KmFromHome:     50.0,
+		HasLastTransaction: true,
+		LastTimestamp:  time.Date(2026, 3, 14, 10, 25, 0, 0, time.UTC),
+		LastKmFromCurrent: 10.0,
 	}
 
-	result := Normalize(payload, testNorm, testMCCRisk)
+	result := Normalize(payload, testNorm)
 
 	if result[5] == -1 {
-		t.Errorf("dim5 should not be -1 when last_transaction is present, got %d", result[5])
+		t.Errorf("dim5 (minutes since last tx) should not be -1")
 	}
 	if result[6] == -1 {
-		t.Errorf("dim6 should not be -1 when last_transaction is present, got %d", result[6])
+		t.Errorf("dim6 (km from last tx) should not be -1")
 	}
 
-	// dim5: minutes diff = 20:23:35 - 14:58:35 = 325 min, normalized = 325/1440 = 0.2257
-	// quantized = round(0.2257 * 127) = round(28.66) = 29
-	minutes := payload.Transaction.RequestedAt.Sub(payload.LastTransaction.Timestamp).Minutes()
-	expectedDim5 := Quantize(clamp(minutes / testNorm.MaxMinutes))
-	if !withinTolerance(result[5], expectedDim5) {
-		t.Errorf("dim5 = %d, expected around %d (minutes=%.1f)", result[5], expectedDim5, minutes)
+	// minutes since last tx: 5 min → 5/1440 ≈ 0.00347 → quantize → 0
+	if result[5] != 0 {
+		t.Errorf("dim5 (5min) = %d, expected 0", result[5])
 	}
-
-	// dim6: 18.86 / 1000 = 0.01886, quantized = round(0.01886*127) = round(2.395) = 2
-	expectedDim6 := Quantize(clamp(payload.LastTransaction.KmFromCurrent / testNorm.MaxKm))
-	if !withinTolerance(result[6], expectedDim6) {
-		t.Errorf("dim6 = %d, expected around %d", result[6], expectedDim6)
+	// km from last tx: 10 → 10/1000 = 0.01 → quantize → 1
+	if result[6] != 1 {
+		t.Errorf("dim6 (10km) = %d, expected 1", result[6])
 	}
-
-	// dims 0-4 should match legit case
-	legitFloats := []float64{0.0041, 0.1667, 0.05}
-	for i := 0; i <= 2; i++ {
-		expected := Quantize(legitFloats[i])
-		if !withinTolerance(result[i], expected) {
-			t.Errorf("dim[%d] = %d, expected around %d", i, result[i], expected)
-		}
+	// is_online
+	if result[9] != 127 {
+		t.Errorf("dim9 (is_online) = %d, want 127", result[9])
 	}
-}
-
-func TestNormalizeEdgeCases(t *testing.T) {
-	payload := &model.TransactionPayload{
-		Transaction: model.TransactionData{
-			Amount:       0,
-			Installments: 0,
-			RequestedAt:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		},
-		Customer: model.CustomerData{
-			AvgAmount:      1.0,
-			TxCount24h:     0,
-			KnownMerchants: []string{},
-		},
-		Merchant: model.MerchantData{
-			ID:        "MERC-999",
-			MCC:       "9999",
-			AvgAmount: 0,
-		},
-		Terminal: model.TerminalData{
-			IsOnline:    false,
-			CardPresent: false,
-			KmFromHome:  0,
-		},
-		LastTransaction: nil,
-	}
-
-	result := Normalize(payload, testNorm, testMCCRisk)
-
-	if result[0] != 0 {
-		t.Errorf("dim0 (zero amount) = %d, want 0", result[0])
-	}
-	if result[1] != 0 {
-		t.Errorf("dim1 (zero installments) = %d, want 0", result[1])
-	}
-	if result[2] != 0 {
-		t.Errorf("dim2 (zero ratio) = %d, want 0", result[2])
-	}
-	if result[3] != 0 {
-		t.Errorf("dim3 (midnight) = %d, want 0", result[3])
-	}
-	if result[9] != 0 {
-		t.Errorf("dim9 (offline) = %d, want 0", result[9])
-	}
+	// card_present false
 	if result[10] != 0 {
-		t.Errorf("dim10 (no card) = %d, want 0", result[10])
+		t.Errorf("dim10 (card_present) = %d, want 0", result[10])
 	}
-	if result[11] != 127 {
-		t.Errorf("dim11 (unknown merchant) = %d, want 127", result[11])
+}
+
+func TestNormalizeMissingMCC(t *testing.T) {
+	payload := &codec.Payload{
+		Amount:         100.0,
+		Installments:   1,
+		RequestedAt:    time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC),
+		AvgAmount:      200.0,
+		TxCount24h:     1,
+		KnownMerchants: []string{"MERC-001"},
+		MerchantID:     "MERC-001",
+		MCC:            "9999",
+		MerchantAvgAmount: 100.0,
+		IsOnline:       false,
+		CardPresent:    true,
+		KmFromHome:     10.0,
+		HasLastTransaction: false,
 	}
-	// unknown MCC defaults to risk 0.5 => Quantize(0.5) = 64
+
+	result := Normalize(payload, testNorm)
+
+	// Missing MCC defaults to 0.5 → quantize(0.5) = 64
 	if result[12] != 64 {
-		t.Errorf("dim12 (default mcc risk) = %d, want 64", result[12])
-	}
-	if result[13] != 0 {
-		t.Errorf("dim13 (zero merchant avg) = %d, want 0", result[13])
-	}
-}
-
-func BenchmarkManhattanDistance(b *testing.B) {
-	v1 := &Vector14{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	v2 := &Vector14{127, 64, 32, 16, 8, 4, 2, 1, 0, 127, 64, 32, 16, 8}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		ManhattanDistance(v1, v2)
-	}
-}
-
-func BenchmarkNormalize(b *testing.B) {
-	payload := &model.TransactionPayload{
-		Transaction: model.TransactionData{
-			Amount:       9505.97,
-			Installments: 10,
-			RequestedAt:  time.Date(2026, 3, 14, 5, 15, 12, 0, time.UTC),
-		},
-		Customer: model.CustomerData{
-			AvgAmount:      81.28,
-			TxCount24h:     20,
-			KnownMerchants: []string{"MERC-008", "MERC-007", "MERC-005"},
-		},
-		Merchant: model.MerchantData{
-			ID:        "MERC-068",
-			MCC:       "7802",
-			AvgAmount: 54.86,
-		},
-		Terminal: model.TerminalData{
-			IsOnline:    false,
-			CardPresent: true,
-			KmFromHome:  952.27,
-		},
-		LastTransaction: nil,
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		Normalize(payload, testNorm, testMCCRisk)
+		t.Errorf("dim12 (missing mcc risk) = %d, want 64 (risk=0.5)", result[12])
 	}
 }

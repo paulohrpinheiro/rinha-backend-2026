@@ -5,7 +5,7 @@ package vector
 import (
 	"math"
 
-	"rinha-backend/internal/model"
+	"rinha-backend/internal/codec"
 )
 
 // Vector14 is a 14-dimensional vector quantized to int8.
@@ -132,58 +132,72 @@ func ManhattanDistance(a, b *Vector14) int32 {
 	return sum
 }
 
-// Normalize converts a transaction payload into a quantized 14-dimensional vector.
-func Normalize(payload *model.TransactionPayload, norm *model.Normalization, mccRisk map[string]float64) Vector14 {
+// NormalizationConfig holds the normalization constants and MCC risk map.
+type NormalizationConfig struct {
+	MaxAmount            float64
+	MaxInstallments      float64
+	AmountVsAvgRatio     float64
+	MaxMinutes           float64
+	MaxKm                float64
+	MaxTxCount24h        float64
+	MaxMerchantAvgAmount float64
+	MCCRisk              map[string]float64
+}
+
+// Normalize converts a binary-decoded transaction payload into a quantized
+// 14-dimensional vector. It accepts *codec.Payload directly (zero allocations
+// for JSON strings).
+func Normalize(payload *codec.Payload, norm *NormalizationConfig) Vector14 {
 	var v Vector14
 
 	// dim0: amount (clamped to [0,1], then quantized)
-	v[0] = Quantize(clamp(payload.Transaction.Amount / norm.MaxAmount))
+	v[0] = Quantize(clamp(payload.Amount / norm.MaxAmount))
 
 	// dim1: installments
-	v[1] = Quantize(clamp(float64(payload.Transaction.Installments) / norm.MaxInstallments))
+	v[1] = Quantize(clamp(float64(payload.Installments) / norm.MaxInstallments))
 
 	// dim2: amount vs customer avg ratio
-	ratio := payload.Transaction.Amount / payload.Customer.AvgAmount
+	ratio := payload.Amount / payload.AvgAmount
 	v[2] = Quantize(clamp(ratio / norm.AmountVsAvgRatio))
 
 	// dim3: hour of day (0-23, UTC)
-	hour := payload.Transaction.RequestedAt.Hour()
+	hour := payload.RequestedAt.Hour()
 	v[3] = Quantize(float64(hour) / 23.0)
 
 	// dim4: day of week (seg=0, dom=6)
-	weekday := payload.Transaction.RequestedAt.Weekday()
+	weekday := payload.RequestedAt.Weekday()
 	v[4] = Quantize(float64(weekday) / 6.0)
 
 	// dim5: minutes since last tx (-1 if null)
-	if payload.LastTransaction == nil {
+	if !payload.HasLastTransaction {
 		v[5] = sentinel
 	} else {
-		minutes := payload.Transaction.RequestedAt.Sub(payload.LastTransaction.Timestamp).Minutes()
+		minutes := payload.RequestedAt.Sub(payload.LastTimestamp).Minutes()
 		v[5] = Quantize(clamp(minutes / norm.MaxMinutes))
 	}
 
 	// dim6: km from last tx (-1 if null)
-	if payload.LastTransaction == nil {
+	if !payload.HasLastTransaction {
 		v[6] = sentinel
 	} else {
-		v[6] = Quantize(clamp(payload.LastTransaction.KmFromCurrent / norm.MaxKm))
+		v[6] = Quantize(clamp(payload.LastKmFromCurrent / norm.MaxKm))
 	}
 
 	// dim7: km from home
-	v[7] = Quantize(clamp(payload.Terminal.KmFromHome / norm.MaxKm))
+	v[7] = Quantize(clamp(payload.KmFromHome / norm.MaxKm))
 
 	// dim8: tx count 24h
-	v[8] = Quantize(clamp(float64(payload.Customer.TxCount24h) / norm.MaxTxCount24h))
+	v[8] = Quantize(clamp(float64(payload.TxCount24h) / norm.MaxTxCount24h))
 
 	// dim9: is_online (0 or 1 → 0 or 127)
-	if payload.Terminal.IsOnline {
+	if payload.IsOnline {
 		v[9] = 127
 	} else {
 		v[9] = 0
 	}
 
 	// dim10: card_present (0 or 1)
-	if payload.Terminal.CardPresent {
+	if payload.CardPresent {
 		v[10] = 127
 	} else {
 		v[10] = 0
@@ -191,8 +205,8 @@ func Normalize(payload *model.TransactionPayload, norm *model.Normalization, mcc
 
 	// dim11: unknown_merchant (1 if merchant not in known_merchants)
 	known := false
-	for _, km := range payload.Customer.KnownMerchants {
-		if km == payload.Merchant.ID {
+	for _, km := range payload.KnownMerchants {
+		if km == payload.MerchantID {
 			known = true
 			break
 		}
@@ -203,15 +217,15 @@ func Normalize(payload *model.TransactionPayload, norm *model.Normalization, mcc
 		v[11] = 0
 	}
 
-	// dim12: mcc_risk (padrão 0.5)
-	risk, ok := mccRisk[payload.Merchant.MCC]
+	// dim12: mcc_risk (from lookup table, default 0.5)
+	risk, ok := norm.MCCRisk[payload.MCC]
 	if !ok {
 		risk = 0.5
 	}
 	v[12] = Quantize(clamp(risk))
 
 	// dim13: merchant avg_amount
-	v[13] = Quantize(clamp(payload.Merchant.AvgAmount / norm.MaxMerchantAvgAmount))
+	v[13] = Quantize(clamp(payload.MerchantAvgAmount / norm.MaxMerchantAvgAmount))
 
 	return v
 }

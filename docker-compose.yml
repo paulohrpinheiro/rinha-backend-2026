@@ -39,6 +39,8 @@ services:
       - PORT=8080
       - RESOURCES_DIR=/resources
       - UNIX_SOCKET_DIR=/run/sock
+      - GOGC=off
+      - GOMEMLIMIT=150MiB
     networks:
       - rinha-net
     volumes:
@@ -59,6 +61,8 @@ services:
       - PORT=8080
       - RESOURCES_DIR=/resources
       - UNIX_SOCKET_DIR=/run/sock
+      - GOGC=off
+      - GOMEMLIMIT=150MiB
     networks:
       - rinha-net
     volumes:

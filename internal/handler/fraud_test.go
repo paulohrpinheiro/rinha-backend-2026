@@ -1,14 +1,14 @@
 package handler
 
 import (
-	"encoding/json"
+	"bytes"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+	"time"
 
+	"rinha-backend/internal/codec"
 	"rinha-backend/internal/index"
-	"rinha-backend/internal/model"
 	"rinha-backend/internal/vector"
 )
 
@@ -48,7 +48,7 @@ func newTestHandler() *FraudHandler {
 
 	idx := index.NewIVFIndex(vectors, labels, centroids, offsets)
 
-	norm := &model.Normalization{
+	norm := &vector.NormalizationConfig{
 		MaxAmount:            10000,
 		MaxInstallments:      12,
 		AmountVsAvgRatio:     10,
@@ -56,14 +56,13 @@ func newTestHandler() *FraudHandler {
 		MaxKm:                1000,
 		MaxTxCount24h:        20,
 		MaxMerchantAvgAmount: 10000,
+		MCCRisk: map[string]float64{
+			"5411": 0.15,
+			"7802": 0.75,
+		},
 	}
 
-	mccRisk := map[string]float64{
-		"5411": 0.15,
-		"7802": 0.75,
-	}
-
-	return New(idx, norm, mccRisk)
+	return New(idx, norm)
 }
 
 func TestReady(t *testing.T) {
@@ -78,71 +77,68 @@ func TestReady(t *testing.T) {
 		t.Errorf("Expected 200, got %d", rec.Code)
 	}
 
-	var body map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-		t.Fatalf("Failed to decode response: %v", err)
-	}
-
-	if body["status"] != "ok" {
-		t.Errorf("Expected status 'ok', got '%s'", body["status"])
+	body := rec.Body.String()
+	if body != `{"status":"ok"}` {
+		t.Errorf("Expected status 'ok', got '%s'", body)
 	}
 }
 
 func TestFraudScore(t *testing.T) {
 	h := newTestHandler()
 
-	payload := map[string]interface{}{
-		"id": "test-001",
-		"transaction": map[string]interface{}{
-			"amount":       100.0,
-			"installments": 1,
-			"requested_at": "2026-03-11T18:45:53Z",
-		},
-		"customer": map[string]interface{}{
-			"avg_amount":      200.0,
-			"tx_count_24h":    5,
-			"known_merchants": []string{"MERC-001"},
-		},
-		"merchant": map[string]interface{}{
-			"id":         "MERC-001",
-			"mcc":        "5411",
-			"avg_amount": 150.0,
-		},
-		"terminal": map[string]interface{}{
-			"is_online":    false,
-			"card_present": true,
-			"km_from_home": 10.0,
-		},
-		"last_transaction": nil,
+	// Build binary request payload
+	payload := &codec.Payload{
+		Amount:         100.0,
+		Installments:   1,
+		RequestedAt:    time.Date(2026, 3, 11, 18, 45, 53, 0, time.UTC),
+		AvgAmount:      200.0,
+		TxCount24h:     5,
+		KnownMerchants: []string{"MERC-001"},
+		MerchantID:     "MERC-001",
+		MCC:            "5411",
+		MerchantAvgAmount: 150.0,
+		IsOnline:       false,
+		CardPresent:    true,
+		KmFromHome:     10.0,
+		HasLastTransaction: false,
 	}
 
-	bodyBytes, _ := json.Marshal(payload)
-	req := httptest.NewRequest("POST", "/fraud-score", strings.NewReader(string(bodyBytes)))
-	req.Header.Set("Content-Type", "application/json")
+	var buf bytes.Buffer
+	if err := codec.EncodePayload(&buf, payload); err != nil {
+		t.Fatalf("Failed to encode payload: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/fraud-score", &buf)
+	req.Header.Set("Content-Type", "application/octet-stream")
 	rec := httptest.NewRecorder()
 
 	h.FraudScore(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Errorf("Expected 200, got %d", rec.Code)
+		t.Errorf("Expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp model.FraudScoreResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("Failed to decode response: %v", err)
+	// Decode binary response (Content-Type: application/octet-stream)
+	if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("Expected Content-Type application/octet-stream, got %s", ct)
 	}
 
-	// response must have both fields
+	resp, err := codec.DecodeResponse(rec.Body)
+	if err != nil {
+		t.Fatalf("Failed to decode binary response: %v", err)
+	}
+
 	if resp.FraudScore < 0 || resp.FraudScore > 1.0 {
 		t.Errorf("FraudScore out of range [0,1]: %f", resp.FraudScore)
 	}
 }
 
-func TestFraudScoreInvalidJSON(t *testing.T) {
+func TestFraudScoreInvalidPayload(t *testing.T) {
 	h := newTestHandler()
 
-	req := httptest.NewRequest("POST", "/fraud-score", strings.NewReader(`{invalid json}`))
-	req.Header.Set("Content-Type", "application/json")
+	// Send garbage bytes (not valid binary payload)
+	req := httptest.NewRequest("POST", "/fraud-score", bytes.NewReader([]byte{0xFF, 0x00}))
+	req.Header.Set("Content-Type", "application/octet-stream")
 	rec := httptest.NewRecorder()
 
 	h.FraudScore(rec, req)

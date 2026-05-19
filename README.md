@@ -14,10 +14,15 @@ Client -> Proxy -> API #1 e API #2 (round-robin)
 
 | Serviço | CPU | Memória | Função |
 |---------|:---:|:-------:|--------|
-| proxy   | 0.10 | 20 MB | Load balancer round-robin + /ready |
-| api-1   | 0.45 | 165 MB | Detecção de fraude (IVF) |
-| api-2   | 0.45 | 165 MB | Detecção de fraude (IVF) |
+| proxy   | 0.10 | 20 MB | Load balancer round-robin + /ready + JSON→binário |
+| api-1   | 0.45 | 165 MB | Detecção de fraude (IVF, protocolo binário) |
+| api-2   | 0.45 | 165 MB | Detecção de fraude (IVF, protocolo binário) |
 | Total   | 1.0 | 350 MB | — |
+
+**Protocolo**: O proxy recebe JSON do cliente, faz o parsing, codifica em formato
+binário compacto (~80-130 bytes), e envia para as APIs via Unix socket. As APIs
+leem o binário diretamente (zero alocações de parsing) e respondem com 9 bytes
+binários. O proxy decodifica e serializa a resposta JSON para o cliente.
 
 ---
 
@@ -144,7 +149,10 @@ Em desenvolvimento local (sem Docker), a API faz o carregamento completo do `ref
 como fallback.
 
 ### 2. Recebimento
-`POST /fraud-score` recebe JSON com dados da transação.
+`POST /fraud-score` recebe JSON com dados da transação. O proxy faz o parsing
+JSON e codifica para um formato binário compacto (~80-130 bytes) antes de
+enviar para as APIs via Unix socket. As APIs leem o binário diretamente,
+sem `json.Unmarshal` — zero alocações de parsing.
 
 ### 3. Vetorização (14 dimensões)
 Cada campo é normalizado para [0,1] seguindo as fórmulas em [REGRAS_DE_DETECCAO.md](./docs/REGRAS_DE_DETECCAO.md) e quantizado para int8 (0-127), reduzindo 4x o uso de memória.
@@ -306,6 +314,11 @@ Documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)** — arquivo de contex
 | 29 | json.NewDecoder direto | Elimina cópia intermediária do body |
 | 30 | Proxy custom (sem httputil) | Reduz CPU por requisição de 0.5ms para 0.15ms |
 | 31 | hostname explícito nos APIs | Alinha socket names entre proxy e API |
+| 32 | Pool de buffers no proxy | Zero alocações de body no proxy |
+| 33 | json.Unmarshal com pool | Elimina json.Decoder na API |
+| 34 | Busca em 2 clusters | Recall próximo do brute force |
+| 35 | K-means++ + 10 iterações | Centroides melhor distribuídos |
+| 36 | Protocolo binário proxy↔API | Zero alocações de JSON parsing na API |
 
 ---
 

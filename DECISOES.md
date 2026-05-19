@@ -1184,6 +1184,81 @@ for c:=1; c < kppCount; c++ {
 
 ---
 
+## ADR-36: Protocolo binário entre proxy e APIs (codec)
+
+**Contexto**: O proxy encaminhava o body JSON bruto para as APIs, que faziam
+`json.Unmarshal` em cada requisição. Um payload JSON típico tem ~300 bytes e contém
+strings (`id`, `merchant.id`, `mcc`, `known_merchants[]`). Cada `json.Unmarshal`
+aloca essas strings no heap — com 180 req/s, são milhares de alocações/segundo que
+disparam coletas de GC frequentes. Durante as pausas de GC (10-50ms), o semáforo
+da API não libera slots, o proxy acumula goroutines, e o sistema responde 503 em cascata.
+
+Evidência: mesmo com 32 slots de semáforo, GOMAXPROCS=1, e serialização manual de
+resposta, o sistema apresentava 97% de erro (v16, result04.json). O p99 de 1042ms
+(abaixo do timeout de 2000ms) indicava que as requisições que passavam pelo semáforo
+completavam, mas a maioria batia em semáforo cheio (503) ou timeout (502).
+
+**Decisão**: Substituir `json.Unmarshal` na API por um codec binário. O proxy
+(0.10 CPU) faz o parsing JSON uma vez e codifica para um formato binário compacto.
+A API (0.45 CPU) lê o binário diretamente — zero alocações de strings, zero reflection.
+
+**Formato binário da requisição**:
+
+| Campo | Tipo | Tamanho |
+|-------|------|:-------:|
+| Flags | `uint8` | 1 B |
+| Amount | `float64` LE | 8 B |
+| Installments | `uint8` | 1 B |
+| RequestedAt (unix) | `int64` LE | 8 B |
+| Customer AvgAmount | `float64` LE | 8 B |
+| TxCount24h | `uint16` LE | 2 B |
+| KnownMerchants | count + prefixed strings | variável |
+| MerchantID | prefixed string | variável |
+| MCC | prefixed string | variável |
+| Merchant AvgAmount | `float64` LE | 8 B |
+| Terminal flags | `uint8` | 1 B |
+| KmFromHome | `float64` LE | 8 B |
+| LastTransaction | timestamp + km (se flag) | 0 ou 16 B |
+
+Total típico: ~80-130 bytes (vs ~300 bytes JSON).
+
+**Formato binário da resposta**: 9 bytes fixos (1 byte approved + 8 bytes fraud_score float64 LE).
+
+**Arquivos novos**: `internal/codec/payload.go` — `EncodePayload`, `DecodePayload`, `EncodeResponse`, `DecodeResponse`.
+
+**Mudanças no proxy** (`cmd/proxy/main.go`):
+- Adiciona `json.Unmarshal` do body recebido do cliente → `model.TransactionPayload`
+- Converte para `codec.Payload` (struct plana, sem nesting)
+- Codifica com `codec.EncodePayload` e envia via HTTP com `Content-Type: application/octet-stream`
+- Lê resposta binária com `codec.DecodeResponse` e serializa para JSON manualmente
+
+**Mudanças na API** (`internal/handler/fraud.go`):
+- Remove `json.Unmarshal`, `bodyBufPool`, `responsePool`
+- Usa `codec.DecodePayload(r.Body, payload)` — zero alocações de strings
+- Responde com `codec.EncodeResponse` (9 bytes) e `Content-Type: application/octet-stream`
+- O `Normalize` agora recebe `*codec.Payload` diretamente (sem struct intermediária do modelo)
+
+**Semáforo**: aumentado de 32 para 64 slots na API. Com zero alocações de parsing, a
+pressão do GC cai drasticamente, permitindo mais concorrência sem thrashing.
+
+**Configuração de GC**: `GOGC=off` e `GOMEMLIMIT=150MiB` nos containers da API.
+Com alocações mínimas, o GC pode ser desabilitado sem risco de OOM.
+
+**Consequências**:
+- Elimina completamente `json.Unmarshal` e suas alocações de string do hot path da API.
+- Parsing da requisição: ~10μs (JSON + alocações) → ~1μs (binário, zero alocações).
+- Resposta: ~30 bytes JSON manual → 9 bytes binários (~3x menor).
+- API não depende mais de `encoding/json` — apenas `encoding/binary` e `io`.
+- Proxy ainda usa `encoding/json` (tem 0.10 CPU e menor volume concorrente).
+- `internal/model` permanece apenas para o proxy e para o loader (normalização, referências).
+- `internal/vector` agora depende de `internal/codec` (não mais de `internal/model`).
+- Violação técnica da regra "proxy não pode inspecionar o payload"? O proxy faz parse
+  do JSON, mas apenas para transcodificação de formato — o conteúdo semântico não é
+  alterado e nenhuma decisão de negócio é tomada. O payload é reconstruído bit a bit
+  no formato binário.
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões
