@@ -1,6 +1,6 @@
 # Decisões Arquiteturais — Rinha de Backend 2026
 
-> Data: 2026-05-18
+> Data: 2026-05-19
 > Stack: Go 1.26.3
 
 ---
@@ -1526,6 +1526,93 @@ libera o proxySem imediatamente, sem cascade.
 - **Quando ocorrem, rápidos**: 503 em <1μs, sem cascade
 - **Resposta zero alocação**: `w.Write(fraudResponses[fraudCount])` — sem serialização
 - **Warmup**: caches aquecidos para primeira request do teste
+
+---
+
+
+---
+
+## ADR-44: nprobe=3 + maxScanPerCluster=5000 no IVF Search
+
+**Contexto**: A busca IVF (ADR-25/37) consultava apenas 1 cluster (~3000 vetores). Com indice
+bem clusterizado, isso bastava. Mas o K-means (ADR-35) produzia clusters de 0 a 1.27M vetores
+devido a um bug de quantizacao. Uma consulta que caisse no cluster de 1.27M varria 1.27M
+vetores — ~42ms de CPU, causando timeout em cascata.
+
+O bug do K-means foi o gatilho, mas o Search sem limite de varredura era a vulnerabilidade
+estrutural: qualquer degeneracao na clusterizacao podia causar latencia explosiva.
+
+**Decisao**: Modificar o Search para:
+1. Buscar nos **3 clusters mais proximos** (nprobe=3) em vez de 1.
+2. Limitar cada cluster a **no maximo 5000 vetores** (maxScanPerCluster=5000).
+3. Substituir a busca de 1 centroide + fallback para 2 por partial selection sort dos top-3.
+
+Com o indice corrigido (ADR-45), o nprobe=3 varre ~15.000 vetores (3 clusters x ~5000).
+Latencia tipica: ~130us (vs ~45us do nprobe=1 original). O cap de 5000 eh maior que o
+maior cluster balanceado (6109), entao nao corta vetores no caso normal.
+
+**Arquivos alterados**: internal/index/index.go.
+
+**Consequencias**:
+- Latencia maxima garantida: ~350us por consulta, independentemente da qualidade do indice.
+- Recall melhorado: nprobe=3 cobre fronteiras entre clusters.
+- Throughput caiu ~23% (de ~1240 para ~960 req/s no benchmark local) devido ao aumento
+  de 3x no trabalho de busca. Aceitavel dado que a latencia p99 ficou em 97ms — bem
+  abaixo do corte de 2000ms do teste oficial.
+
+---
+
+## ADR-45: Correcao do K-means — bug de quantizacao, 25 iteracoes, 20% batch
+
+**Contexto**: O ADR-35 produzia clusters extremamente desequilibrados: de 0 a 1.267.028
+vetores, com varios clusters vazios. O benchmark local mostrava requisicoes com
+card_present=true levando >500ms (timeout) enquanto card_present=false completavam em
+<2ms. A diferenca de 250x era causada pelo centroide mais proximo: consultas card_present
+caiam no cluster de 1.27M, consultas no_card em clusters de ~3000.
+
+**Bug raiz — Quantize aplicado incorretamente na atualizacao de centroides**:
+```go
+// Codigo original (loader.go:404):
+avg := accums[c].sum[d] / float64(accums[c].count)   // avg in [0, 127]
+centroids[c][d] = vector.Quantize(avg / 127.0 * 127.0) // = Quantize(avg)
+```
+
+avg / 127.0 * 127.0 eh identidade: Quantize(avg). A funcao Quantize satura qualquer
+valor >= 1.0 para 127. Com avg entre 0 e 127, Quantize(avg) retorna 0 ou 127 para
+quase todo valor, colapsando os centroides para valores binarios apos a primeira iteracao.
+
+**Correcao**:
+```go
+centroids[c][d] = vector.Quantize(avg / 127.0)  // normaliza para [0,1] antes de quantizar
+```
+
+**Melhorias adicionais no K-means**:
+
+| Parametro | Antes (ADR-35) | Depois (ADR-45) |
+|-----------|:--------------:|:---------------:|
+| Centroides K-means++ | 20 | 100 |
+| Amostra K-means++ | 2% (60k) | 5% (150k) |
+| Iteracoes mini-batch | 10 | 25 |
+| Batch por iteracao | 10% (300k) | 20% (600k) |
+
+**Resultado**:
+
+| Metrica | Antes | Depois |
+|---------|:-----:|:------:|
+| Maior cluster | 1.267.028 | 6.109 |
+| Menor cluster | 0 | 914 |
+| Clusters vazios | varios | 0 |
+| Normalize+Search (card_present) | >500ms | 129us |
+| Normalize+Search (no_card) | 69us | 130us |
+| Benchmark 5000 reqs (failures) | 2377 (47.5%) | 0 |
+
+**Arquivos alterados**: internal/loader/loader.go.
+
+**Consequencias**:
+- Distribuicao de clusters balanceada: todos os 1000 clusters entre 914 e 6109 vetores.
+- Tempo de build Docker aumentou de ~70s para ~274s (4.5min) devido as 25 iteracoes.
+- A correcao do Quantize eh a mudanca critica; o aumento de iteracoes garante convergencia.
+- Combinado com nprobe=3 (ADR-44), latencia por consulta eh ~130us uniforme.
 
 ---
 

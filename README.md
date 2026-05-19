@@ -107,6 +107,9 @@ README.md              # Este arquivo
 | v22 | semáforo bloqueante 128 | 42.949 | 294 | 2002ms | −6000 |
 | v24 | + DecodeBytes fix | 44.800 | 329 | 2002ms | −6000 |
 | v25 | não-bloqueante 1024 + respostas pré-aloc + warmup | ~0* | ~54k* | ~10-50ms* | >+5000* |
+| v26 | v25 + K-means corrigido + nprobe=3 | 0** | 5000** | 97ms** | — |
+
+**Benchmark local v26 (commit c751a1e): 5000 reqs, concurrency 20, zero falhas**
 
 ### Comparativo com o melhor concorrente
 
@@ -174,7 +177,7 @@ As decisões arquiteturais estão documentadas em **[docs/DECISOES.md](./docs/DE
 ### 1. Startup (índice pré-construído)
 
 No **Docker build**, a API carrega os 3M vetores de `references.json.gz` em modo streaming,
-constrói o índice IVF com K-means (5 iterações em mini-batches) e serializa o resultado em
+constrói o índice IVF com K-means (25 iterações em mini-batches de 20%) e serializa o resultado em
 `/resources/index.bin` (formato binário, ~45MB).
 
 No **startup do container**, a API apenas lê o `index.bin` do disco — leva **menos de 1 segundo**.
@@ -193,8 +196,9 @@ sem `json.Unmarshal` — zero alocações de parsing.
 Cada campo é normalizado para [0,1] seguindo as fórmulas em [REGRAS_DE_DETECCAO.md](./docs/REGRAS_DE_DETECCAO.md) e quantizado para int8 (0-127), reduzindo 4x o uso de memória.
 
 ### 4. Busca Vetorial (IVF Index)
-- Encontra o cluster mais próximo entre 1.000 centroides
-- Busca os 5 vizinhos mais próximos dentro desse cluster (~3.000 vetores)
+- Encontra os 3 centroides mais próximos (nprobe=3) entre 1.000 centroides
+- Busca os 5 vizinhos mais próximos dentro desses clusters (até 5.000 vetores por cluster)
+- Distribuição balanceada: clusters de 914 a 6.109 vetores (K-means corrigido)
 - Usa distância Manhattan com loop unrolled
 
 ### 5. Decisão
@@ -251,6 +255,7 @@ Baixe do [repositório oficial da Rinha](https://github.com/zanfranceschi/rinha-
 |----------|:-----:|:---------:|
 | ManhattanDistance (14 dims) | ~14 ns | 0 B/op |
 | Normalize (payload -> vetor) | ~100 ns | 0 B/op |
+| IVF Search (Normalize + Search, 3 clusters) | ~130 µs | 0 B/op |
 
 ---
 
@@ -359,6 +364,10 @@ Documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)** — arquivo de contex
 | 39 | CPU proxy 0.15, APIs 0.425 | Proxy era o novo gargalo (JSON parsing) |
 | 40 | Timeouts 100ms/200ms | Conexões lentas cortadas 5× mais rápido |
 | 41 | Pool de encode no proxy | Zero alocações de buffer de encode |
+| 42 | Semáforo bloqueante (128) | Fila em vez de rejeição — zero 503 |
+| 43 | DecodePayload fix (ReadAll+DecodeBytes) | Elimina blocking read de 200ms |
+| 44 | nprobe=3 + maxScanPerCluster=5000 | Latência máxima ~350µs mesmo com índice degenerado |
+| 45 | K-means corrigido (bug Quantize + 25 iter) | Clusters balanceados: 914-6109 (antes: 0-1.27M) |
 
 ---
 

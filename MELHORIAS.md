@@ -55,7 +55,7 @@ Técnicas:
 
 ---
 
-## 3. Respostas Pré-alocadas
+## 3. Respostas Pré-alocadas ✅ Implementado
 
 ```go
 var fraudResponses = [6][]byte{
@@ -120,7 +120,7 @@ Overhead do fasthttp vs raw: ~0.5μs. Só vale com fd-passing.
 
 ---
 
-## 6. IVF Multi-Probe com Block Bounds
+## 6. IVF Multi-Probe ✅ Parcial (nprobe=3 implementado)
 
 | Característica | Nós (1 cluster) | Eles (8-20 clusters) |
 |:--------------|:---------------:|:--------------------:|
@@ -130,9 +130,11 @@ Overhead do fasthttp vs raw: ~0.5μs. Só vale com fd-passing.
 
 Eles usam `quickProbe=8` (top-8 centroides) e `expandedProbe=20` (expansão para recall). Blocos de 16 vetores com distância min/max ao centroide permitem pular blocos irrelevantes. Vetores em `int16` (escala 10000) para mais precisão.
 
+**Nosso status**: Implementado nprobe=3 com maxScanPerCluster=5000 (ADR-44). Varre ~15.000 vetores (3 clusters x 5000), latencia ~130us. Block bounds e int16 ainda nao implementados.
+
 ---
 
-## 7. Warmup Pré-teste
+## 7. Warmup Pré-teste ✅ Implementado
 
 Container separado com curl faz 48 POSTs simulados antes do teste real:
 
@@ -163,10 +165,10 @@ Aquece caches de CPU, resolve page faults, compila hot paths.
 |---------|------|-----|:---------------:|
 | Proxy/LB | C++ fd-passing | Go parse+encode+fwd | **Alto** |
 | Parsing | Manual byte-a-byte | Codec binário | **Médio** |
-| Respostas | Pré-alocadas | Montagem manual | **Baixo** |
+| Respostas | Pre-alocadas | Pre-alocadas ✅ | Implementado |
 | HTTP Server | fasthttp | stdlib net/http | **Médio** |
 | IVF | 8-20 clusters + block pruning | 1 cluster | **Médio** |
-| Semáforo | Concurrency: 4096 | 128 bloqueante | **Baixo** |
+| Semáforo | Concurrency: 4096 | Nao-bloqueante 1024 ✅ | Implementado |
 | Warmup | 48 POSTs | Nenhum | **Médio** |
 | GOMEMLIMIT | 60MiB | 150MiB | **Baixo** |
 
@@ -176,11 +178,11 @@ Aquece caches de CPU, resolve page faults, compila hot paths.
 
 | Prioridade | Melhoria | Esforço | Impacto |
 |:----------:|:---------|:-------:|:-------:|
-| 1 | Respostas pré-alocadas | 10min | Baixo |
-| 2 | Warmup container | 30min | Médio |
+| 1 | Respostas pre-alocadas | 10min | Baixo | ✅ v25 |
+| 2 | Warmup container | 30min | Medio | ✅ v25 |
 | 3 | Fasthttp | 2-4h | Médio |
 | 4 | Parsing JSON na API (eliminar codec) | 4-8h | Alto |
-| 5 | IVF multi-probe + block bounds | 8-16h | Médio |
+| 5 | IVF multi-probe + block bounds | 8-16h | Medio | ✅ Parcial (nprobe=3 v26) |
 | 6 | C++ fd-passing LB | 16-32h | **Muito alto** |
 
-**Recomendação**: começar com respostas pré-alocadas e warmup. Depois fasthttp + parsing JSON manual na API. Visão de longo prazo: fd-passing.
+**Recomendação**: comecar com respostas pre-alocadas e warmup (✅ feito). K-means corrigido (✅ v26). Proximos: fasthttp + parsing JSON manual na API. Visao de longo prazo: fd-passing.
