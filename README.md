@@ -14,9 +14,9 @@ Client -> Proxy -> API #1 e API #2 (round-robin)
 
 | Serviço | CPU | Memória | Função |
 |---------|:---:|:-------:|--------|
-| proxy   | 0.10 | 20 MB | Load balancer round-robin + /ready + JSON→binário |
-| api-1   | 0.45 | 165 MB | Detecção de fraude (IVF, protocolo binário) |
-| api-2   | 0.45 | 165 MB | Detecção de fraude (IVF, protocolo binário) |
+| proxy   | 0.15 | 20 MB | Load balancer round-robin + /ready + JSON→binário |
+| api-1   | 0.425 | 165 MB | Detecção de fraude (IVF, protocolo binário) |
+| api-2   | 0.425 | 165 MB | Detecção de fraude (IVF, protocolo binário) |
 | Total   | 1.0 | 350 MB | — |
 
 **Protocolo**: O proxy recebe JSON do cliente, faz o parsing, codifica em formato
@@ -319,6 +319,11 @@ Documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)** — arquivo de contex
 | 34 | Busca em 2 clusters | Recall próximo do brute force |
 | 35 | K-means++ + 10 iterações | Centroides melhor distribuídos |
 | 36 | Protocolo binário proxy↔API | Zero alocações de JSON parsing na API |
+| 37 | Early exit IVF (1 cluster) | Reduz busca em 50% (6000→3000 vetores) |
+| 38 | Semáforos 64→16 | Menos contenção de scheduler (GOMAXPROCS=1) |
+| 39 | CPU proxy 0.15, APIs 0.425 | Proxy era o novo gargalo (JSON parsing) |
+| 40 | Timeouts 100ms/200ms | Conexões lentas cortadas 5× mais rápido |
+| 41 | Pool de encode no proxy | Zero alocações de buffer de encode |
 
 ---
 

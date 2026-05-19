@@ -57,8 +57,16 @@ var codecPayloadPool = sync.Pool{
 	New: func() any { return new(codec.Payload) },
 }
 
+// encodeBufPool reuses bytes.Buffer for binary payload encoding,
+// avoiding allocation per request (~130 bytes each).
+var encodeBufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
 // proxySem limits concurrent proxy requests.
-var proxySem = make(chan struct{}, 64)
+// Reduced from 64 to 16: with 0.10 CPU, 64 goroutines caused
+// scheduling overhead; 16 is sufficient for the proxy workload.
+var proxySem = make(chan struct{}, 16)
 
 // RoundRobinProxy handles POST /fraud-score: parses JSON, encodes to binary,
 // forwards to an API, decodes binary response, returns JSON.
@@ -128,17 +136,20 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		cp.LastKmFromCurrent = jsonPayload.LastTransaction.KmFromCurrent
 	}
 
-	// 6. Encode binary payload into buffer
-	var binBuf bytes.Buffer
-	if err := codec.EncodePayload(&binBuf, cp); err != nil {
+	// 6. Encode binary payload into pooled buffer
+	binBuf := encodeBufPool.Get().(*bytes.Buffer)
+	binBuf.Reset()
+	if err := codec.EncodePayload(binBuf, cp); err != nil {
+		encodeBufPool.Put(binBuf)
 		http.Error(w, "encode error", http.StatusInternalServerError)
 		return
 	}
 
 	// 7. Build backend request with binary body
 	targetURL := backend + r.URL.Path
-	breq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, &binBuf)
+	breq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, binBuf)
 	if err != nil {
+		encodeBufPool.Put(binBuf)
 		http.Error(w, "cannot create request", http.StatusInternalServerError)
 		return
 	}
@@ -147,6 +158,7 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 8. Send to backend via http.Client (Unix socket transport)
 	resp, err := p.client.Do(breq)
+	encodeBufPool.Put(binBuf) // buffer consumed by http.NewRequestWithContext
 	if err != nil {
 		http.Error(w, "backend error", http.StatusBadGateway)
 		return
@@ -286,7 +298,7 @@ func main() {
 		backends: rawBackends,
 		client: &http.Client{
 			Transport: proxyTransport,
-			Timeout:   1 * time.Second,
+			Timeout:   500 * time.Millisecond,
 		},
 	}
 
@@ -307,9 +319,9 @@ func main() {
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           mux,
-		ReadHeaderTimeout: 500 * time.Millisecond,
-		ReadTimeout:       1 * time.Second,
-		WriteTimeout:      1 * time.Second,
+		ReadHeaderTimeout: 100 * time.Millisecond,
+		ReadTimeout:       200 * time.Millisecond,
+		WriteTimeout:      200 * time.Millisecond,
 		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    4096,
 	}

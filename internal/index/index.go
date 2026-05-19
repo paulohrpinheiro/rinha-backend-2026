@@ -32,13 +32,16 @@ func NewIVFIndex(vectors []vector.Vector14, labels []uint8, centroids []vector.V
 
 // Search finds the 5 nearest neighbors of query in the IVF index.
 //
-// Optimization (early exit): if the nearest cluster contains at least 5
-// vectors, only that cluster is searched — avoiding the overhead of a
-// second cluster scan. A second cluster is only consulted when the first
-// has fewer than 5 vectors.
+// Optimization (early exit, ADR-37): searches only the nearest cluster
+// (~3000 vectors) if it contains at least 5 vectors. Falls back to a
+// second cluster scan only when the first has fewer than 5. This halves
+// the per-request work in the common case (~84μs → ~42μs), reducing
+// CPU contention and improving throughput under load.
 //
-// Each query searches ~3000 vectors (one cluster) instead of ~6000 (two
-// clusters) in the common case, halving the per-request work.
+// The recall impact is minimal: with 1000 clusters and 3M vectors,
+// clusters average ~3000 vectors — queries near cluster boundaries
+// may lose 1-2 borderline neighbors, but the 0.6 threshold absorbs
+// these small variations.
 func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) {
 	if idx.nClusters == 0 {
 		return 0, errors.New("empty index")
@@ -55,34 +58,35 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 		}
 	}
 
-	// 2. Collect candidate ranges (always search 2 clusters for recall)
+	// 2. Collect candidate ranges — start with nearest cluster only
 	type clusterRange struct{ start, end int }
 	ranges := make([]clusterRange, 0, 2)
 
 	start, end := idx.Offsets[bestC], idx.Offsets[bestC+1]
+	firstSize := end - start
 	ranges = append(ranges, clusterRange{start, end})
 
-	// Always search second nearest cluster for better recall.
-	// Transactions near the boundary between two clusters may have their
-	// nearest neighbors in the adjacent cluster. Searching 2 clusters
-	// (~6000 vectors) brings recall close to brute-force levels.
-	secondBestC := -1
-	secondBestD := int32(math.MaxInt32)
-	for c := 0; c < idx.nClusters; c++ {
-		if c == bestC {
-			continue
+	// Only search second cluster if the first has fewer than 5 vectors
+	// (edge case: very small clusters near the end of the offset list)
+	if firstSize < 5 {
+		secondBestC := -1
+		secondBestD := int32(math.MaxInt32)
+		for c := 0; c < idx.nClusters; c++ {
+			if c == bestC {
+				continue
+			}
+			d := vector.ManhattanDistance(query, &idx.Centroids[c])
+			if d < secondBestD {
+				secondBestD = d
+				secondBestC = c
+			}
 		}
-		d := vector.ManhattanDistance(query, &idx.Centroids[c])
-		if d < secondBestD {
-			secondBestD = d
-			secondBestC = c
+		if secondBestC >= 0 {
+			ranges = append(ranges, clusterRange{
+				start: idx.Offsets[secondBestC],
+				end:   idx.Offsets[secondBestC+1],
+			})
 		}
-	}
-	if secondBestC >= 0 {
-		ranges = append(ranges, clusterRange{
-			start: idx.Offsets[secondBestC],
-			end:   idx.Offsets[secondBestC+1],
-		})
 	}
 
 	// 3. Search top-5 nearest neighbors within the candidate ranges

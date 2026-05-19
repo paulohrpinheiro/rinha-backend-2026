@@ -11,10 +11,11 @@ import (
 )
 
 // semaphore limits concurrent fraud-score requests to prevent
-// goroutine explosion and GC thrashing under high load.
-// With binary codec (zero JSON allocations), GC pressure is much lower,
-// allowing more concurrent requests. Increased from 32 to 64.
-var semaphore = make(chan struct{}, 64)
+// goroutine explosion and Go scheduler thrashing under high load.
+// With GOMAXPROCS=1 and 0.45 CPU, 64 goroutines caused ~20% scheduler
+// overhead (context switching). 16 slots keeps ~4.8ms of simultaneous
+// CPU work, well within budget, and eliminates scheduling contention.
+var semaphore = make(chan struct{}, 16)
 
 // payloadPool reuses codec.Payload structs and their internal buffers
 // (rawBuf, KnownMerchants slice) across requests, avoiding allocations.

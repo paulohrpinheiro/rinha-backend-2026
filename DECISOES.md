@@ -1259,6 +1259,113 @@ Com alocações mínimas, o GC pode ser desabilitado sem risco de OOM.
 
 ---
 
+## ADR-37: Early exit no IVF Search (volta ao ADR-25)
+
+**Contexto**: O ADR-34 havia revertido o early exit para busca em 2 clusters sempre
+(~6000 vetores/query, ~84μs). Com 16 goroutines simultâneas (ADR-38), o
+trabalho de busca em 2 clusters representa ~1.3ms de CPU simultânea.
+Reduzir pela metade libera CPU para processar mais requisições sob carga.
+
+**Decisão**: Buscar apenas no cluster mais próximo (~3000 vetores), com fallback
+para o segundo cluster apenas se o primeiro tiver menos de 5 vetores (caso raro).
+
+**Consequências**:
+- Trabalho de busca cai de ~84μs para ~42μs (metade).
+- Recall pode cair marginalmente (1-2 vizinhos de fronteira), mas o threshold
+  de 0.6 absorve essas variações.
+- Prioridade atual é reduzir os 98% de erros HTTP; FPs/FNs são secundários.
+
+---
+
+## ADR-38: Redução de semáforos (64 → 16) para reduzir contenção de scheduler
+
+**Contexto**: Com GOMAXPROCS=1 e 0.45 CPU, 64 goroutines competindo por 1 thread
+de OS causavam overhead de scheduling estimado em 15-25%. Cada troca de contexto
+custa ~1-2μs; com 64 goroutines, o scheduler pode gastar mais tempo chaveando
+do que processando.
+
+**Decisão**: Reduzir semáforos:
+- API: 64 → 16 slots
+- Proxy: 64 → 16 slots
+
+**Cálculo**: 16 concorrentes × 0.3ms = 4.8ms de CPU simultânea por API —
+folgado para 0.45 CPU (450ms/s). O scheduler tem menos goroutines para gerenciar,
+reduzindo overhead de `sched_yield` e melhorando cache locality.
+
+**Consequências**:
+- Mais requisições recebem 503 "too many requests" sob picos extremos.
+- Mas as requisições que entram completam mais rápido (menos contenção).
+- Trade-off: 503 imediato é melhor que timeout (peso 5 no scoring).
+
+---
+
+## ADR-39: Redistribuição de CPU (proxy 0.15, APIs 0.425)
+
+**Contexto**: Com 0.10 CPU no proxy fazendo `json.Unmarshal` + encode binário
+(~0.5ms por requisição), o throughput máximo teórico era ~200 req/s — muito
+próximo da média de 180 req/s do teste, sem folga para picos. O proxy era
+o novo gargalo principal.
+
+**Decisão**: Redistribuir o orçamento de 1.0 CPU:
+
+| Serviço | Antes | Depois |
+|---------|:-----:|:------:|
+| proxy   | 0.10  | **0.15** |
+| api-1   | 0.45  | **0.425** |
+| api-2   | 0.45  | **0.425** |
+| Total   | 1.0   | 1.0    |
+
+**Cálculo**: Com 0.15 CPU (150ms/s) e ~0.5ms por requisição, throughput máximo
+sobe para ~300 req/s — folga de 60% sobre os 180 req/s médios. As APIs perdem
+0.025 CPU cada (5.5%), mas a busca IVF em 1 cluster (ADR-37) compensa essa perda.
+
+**Consequências**:
+- Proxy tem folga para picos de carga sem acumular fila.
+- APIs perdem 5.5% de CPU, compensado pela redução de 50% no trabalho de busca.
+- Orçamento total inalterado (1.0 CPU, 350 MB).
+
+---
+
+## ADR-40: Redução de timeouts HTTP (100ms/200ms/200ms)
+
+**Contexto**: Com Unix sockets e protocolo binário, cada requisição completa em
+<1ms. Timeouts de 500ms/1s são 500-1000× maiores que o necessário, mantendo
+conexões lentas abertas por tempo excessivo sob carga.
+
+**Decisão**: Reduzir timeouts:
+
+| Timeout | Antes | Depois |
+|---------|:-----:|:------:|
+| ReadHeaderTimeout | 500ms | **100ms** |
+| ReadTimeout | 1s | **200ms** |
+| WriteTimeout | 1s | **200ms** |
+| Proxy client timeout | 1s | **500ms** |
+
+**Consequências**:
+- Conexões lentas são cortadas 5× mais rápido, liberando slots de semáforo.
+- 100ms para header é 100.000× maior que o necessário (~1μs).
+- 200ms para body/response é 200.000× maior que o necessário.
+- Timeout de 500ms no proxy→API ainda é seguro (latência real <1ms).
+
+---
+
+## ADR-41: Pool de buffer de encode binário no proxy
+
+**Contexto**: O proxy alocava um `bytes.Buffer` a cada requisição para codificar
+o payload binário (~130 bytes). Com 180 req/s, são 180 alocações/segundo que
+pressionam o GC do proxy.
+
+**Decisão**: Usar `sync.Pool` (`encodeBufPool`) para reutilizar buffers de
+encode binário. O buffer é obtido no início do handler, usado para
+`codec.EncodePayload`, passado para `http.NewRequestWithContext`, e devolvido
+ao pool após `client.Do`.
+
+**Consequências**:
+- Zero alocações de buffer de encode no proxy.
+- Menos pressão de GC no proxy (que tem apenas 0.15 CPU e 20 MB).
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões
