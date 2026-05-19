@@ -1429,6 +1429,63 @@ func handler(w, r) {
 
 ---
 
+## ADR-43: Correção do DecodePayload — leitura exata do body em vez de leitura até 4096 bytes
+
+**Contexto**: v22 (semáforo bloqueante 128 slots) ainda falhou com p99=2002ms e apenas 294
+requisições processadas — virtualmente idêntico ao v21 (sem semáforo). O bloqueante resolveu
+os 503s mas o throughput continuou péssimo.
+
+**Bug**: `DecodePayload` em `internal/codec/payload.go` usava `io.ReadAtLeast` seguido de um
+loop que lia até `MaxPayloadSize` (4096 bytes):
+
+```go
+n, err := io.ReadAtLeast(r, buf, 1)
+// ... lê ~130 bytes (payload real) ...
+for n < MaxPayloadSize {           // ← 130 < 4096 → entra no loop
+    nr, err := r.Read(buf[n:])     // ← BLOQUEIA! Proxy não enviou mais dados
+```
+
+O proxy envia ~130 bytes de payload binário e aguarda a resposta. A API lê esses 130 bytes
+e depois tenta ler mais 3966 — bloqueando por 200ms (ReadTimeout) a cada chamada.
+
+**Impacto**: cada goroutine que adquire um slot do semáforo (128) bloqueia por 200ms
+desnecessariamente. Os slots lotam. Proxy timeout (500ms) no `client.Do`. Cascade.
+Versões v16-v20 escapavam porque o semáforo não-bloqueante (503) impedia a maioria das
+requisições de chegar à API — as ~3.700 que passavam tinham scheduler livre e o bug
+não cascateava.
+
+**Decisão**: Substituir `codec.DecodePayload(r.Body, payload)` por:
+
+1. Leitura exata do body com `io.ReadAll(r.Body)` — o `http.Server` respeita
+   `Content-Length` e retorna exatamente os bytes enviados pelo proxy, sem bloquear
+2. Parse do slice de bytes com `codec.DecodeBytes(bodyBytes, payload)` — nova função
+   que chama `decodeFromBuffer` diretamente
+
+```go
+// Antes (bloqueante):
+codec.DecodePayload(r.Body, payload)
+//   → lê até 4096 bytes do socket → bloqueia 200ms nos 3966 extras
+
+// Depois (não-bloqueante):
+bodyBytes, _ := io.ReadAll(r.Body)
+codec.DecodeBytes(bodyBytes, payload)
+//   → lê exatos Content-Length bytes (130) → zero blocking
+```
+
+**Arquivos alterados**:
+- `internal/codec/payload.go` — adicionou `DecodeBytes(data []byte, p *Payload) error`
+- `internal/handler/fraud.go` — substituiu `DecodePayload(r.Body, payload)` por
+  `io.ReadAll(r.Body)` + `DecodeBytes(bodyBytes, payload)`
+
+**Consequências**:
+- **Zero blocking reads**: `io.ReadAll(r.Body)` lê exatamente Content-Length bytes
+- **Semáforo liberado rapidamente**: goroutine não bloqueia por 200ms desnecessários
+- **p99 esperado**: ~10-50ms (vs 2002ms em v21/v22)
+- **Zero 503**: semáforo bloqueante mantido (128 slots)
+- **Zero timeouts por DecodePayload**: bug da raiz eliminado
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões

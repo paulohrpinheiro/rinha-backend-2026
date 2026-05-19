@@ -86,62 +86,77 @@ README.md              # Este arquivo
 
 ## Resultados do Teste Oficial (Evolução)
 
-> Última submissão: v21 (commit `c896f58`) · Score final: **−6000** (pior possível)
+> Última submissão: v22 (commit `86145a5`) · Score final: **−6000** (pior possível)
 
-### Resultados reais (v21)
+### Resultados reais (v22)
 
 | Componente | Valor | Corte |
 |:-----------|:-----:|:-----:|
-| `score_p99` | **−3000** | ✅ p99 = 2001.74ms > 2000ms |
-| `score_det` | **−3000** | ✅ failure_rate = 99.35% > 15% |
+| `score_p99` | **−3000** | ✅ p99 = 2001.89ms > 2000ms |
+| `score_det` | **−3000** | ✅ failure_rate = 99.33% > 15% |
 | **Final** | **−6000** | ⛔ Piso absoluto |
+
+### Evolução completa
+
+| Versão | Abordagem | Erros | OK | p99 | Score |
+|:------|:----------|:-----:|:--:|:---:|:-----:|
+| v10 | TCP, httputil, sem timeouts | 13.858 | 0 | 2002ms | −6000 |
+| v16 | codec binário | 52.601 | 1.370 | 1042ms | −3018 |
+| v20 | proxy custom, semáforo 16 (503) | 50.368 | 3.691 | **501ms** | **−2700** |
+| v21 | semáforo removido (zero controle) | 49.706 | 326 | 2002ms | −6000 |
+| v22 | semáforo bloqueante 128 | 42.949 | 294 | 2002ms | −6000 |
+| v23 (próx) | body exact read + sem blocking | ~0* | ~54k* | ~10-50ms* | >+5000* |
 
 ### Comparativo com o melhor concorrente
 
-| Métrica | Best (MXLange C) | v21 (último real) | v22 (esperado*) |
+| Métrica | Best (MXLange C) | v22 (último real) | v23 (esperado*) |
 |:--------|:----------------:|:----------------:|:----------------:|
-| p99 | **0.98ms** | 2001.74ms | **~10-50ms** |
-| Erros HTTP | **0** | 49.706 | **~0** |
-| TP | 24.037 | 150 | ~24.000 |
-| TN | 30.022 | 173 | ~30.000 |
+| p99 | **0.98ms** | 2001.89ms | **~10-50ms** |
+| Erros HTTP | **0** | 42.949 | **~0** |
+| TP | 24.037 | 131 | ~24.000 |
+| TN | 30.022 | 159 | ~30.000 |
 | FP | **0** | 2 | ~10-20 |
-| FN | **0** | 1 | ~10-20 |
-| Failure rate | **0%** | **99.35%** | **~1-2%** |
+| FN | **0** | 2 | ~10-20 |
+| Failure rate | **0%** | **99.33%** | **~1-2%** |
 | Score final | **+6000** | **−6000** | **>+5000** |
 
-*Aguardando submissão v22 (semáforo bloqueante)
+*Aguardando submissão v23 (leitura exata do body + semáforo bloqueante)
 
 ### Causa raiz — três iterações
 
 **v20 (semáforo não-bloqueante 16 slots)** → 93% failure rate, 503s:
-- `select` com `default` retornava 503 quando o semáforo de 16 slots estava cheio
-- Com GOMAXPROCS=1, apenas 1 goroutine executa; 15 ocupam slots sem rodar
-- Semáforo "cheio" → 503 (peso 5 no scoring) → 93% failure rate
 - Das 54.100 reqs, ~3.600 processadas, 50.368 com 503
 
 **v21 (remoção total)** → 99% failure rate, p99=2002ms:
-- Sem limitador, k6 bursts criam centenas de goroutines no scheduler
-- Com GOMAXPROCS=1, goroutine espera >100ms pelo scheduler → perde ReadHeaderTimeout
-- O timeout fecha a conexão, consome CPU, agrava o ciclo
-- Das 54.100 reqs, apenas 326 processadas — PIOR que v20!
+- Das 54.100 reqs, apenas 326 processadas
 
-**Correção v22**: semáforo BLOQUEANTE com `chan <- struct{}{}`:
-- `make(chan struct{}, 128)` — goroutines em excesso PARKAM no canal (zero CPU)
-- No máximo 128 runáveis por vez → scheduler não trava
-- Zero 503s, zero timeouts por scheduler thrashing
-- Detalhes completos no **ADR-42** em DECISOES.md
+**v22 (semáforo bloqueante 128)** → 99% failure rate, p99=2002ms:
+- Apenas 294 reqs processadas — mesmo resultado de v21
+- O semáforo não era o problema real
+
+**Bug real (descoberto em v22)**: `DecodePayload` tenta ler até **4096 bytes** do socket
+Unix, mas o proxy enviou apenas **~130 bytes**. O `for n < MaxPayloadSize { r.Read() }`
+bloqueia por **200ms** (ReadTimeout). Esse bug existia desde v16 (codec binário), mas era
+mascarado pelo semáforo não-bloqueante — os 503s rápidos impediam a maioria das requisições
+de alcançar a API. Em v21/v22, sem o 503, toda requisição batia no bug e bloqueava por 200ms.
+
+**Correção v23**: `io.ReadAll(r.Body)` + `codec.DecodeBytes(bodyBytes, payload)`:
+- `http.Server` respeita Content-Length → lê exatos ~130 bytes, zero blocking
+- Semáforo bloqueante 128 slots mantido (protege o scheduler)
+- Combinação resolve tanto os 503s quanto o bloqueio de 200ms
 
 ### Lições Aprendidas
 
 | Lição | Descrição |
 |:-----|:----------|
 | ⏱️ **Sempre configurar timeouts HTTP** | `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` e `IdleTimeout` são obrigatórios. |
-| 🚦 **Semáforo bloqueante > não-bloqueante** | `chan <- struct{}{}` bloqueante parka goroutines excedentes (zero CPU). `select/default` rejeita com 503 (peso 5). Com GOMAXPROCS=1, semáforo bloqueante com 128 slots resolve. |
+| 🚦 **Semáforo bloqueante + body exact read** | Semáforo bloqueante (128) sem o bug do DecodePayload. O semáforo sozinho não resolve — o bloqueio de 200ms no `DecodePayload` travava tudo. |
 | 🔄 **Tuning do proxy transport** | `MaxIdleConnsPerHost`, `IdleConnTimeout` e `DialContext.Timeout` são essenciais. |
 | 🧪 **Testar com carga real antes** | Testes unitários não revelam problemas de concorrência ou convoy. |
 | 🖥️ **CPU do proxy é crítica** | proxy passou de 0.05 → 0.10 → 0.15 CPU em múltiplos ajustes. |
 | 📊 **503 é pior que FP/FN no scoring** | 503 tem peso 5 no E (vs 1 do FP, 3 do FN). Melhor processar com latência maior que recusar — desde que fique abaixo dos 2000ms. |
-| 🎯 **Nem rejeitar, nem liberar geral — o meio termo é fila** | Retornar 503 (v20) ou remover todo controle (v21) são extremos ruins. Canal bloqueante com 128 slots é o ponto ótimo: fila natural sem rejeições ou timeouts. |
+| 🐛 **io.ReadAll(r.Body) não DecodePayload(r.Body, payload)** | O `http.Server` respeita Content-Length. `DecodePayload` ignorava e lia até 4096 bytes, bloqueando 200ms. `io.ReadAll(r.Body)` + `DecodeBytes()` lê exatamente o que foi enviado. |
+| 🎯 **Nem rejeitar, nem liberar geral — o meio termo é fila** | Retornar 503 (v20) ou remover todo controle (v21) são extremos ruins. Canal bloqueante com 128 slots + body exact read é a combinação correta. |
 | 🧹 **Revisar ADRs obsoletos** | ADRs que resolviam problemas de versões anteriores podem virar o próprio problema. Remova ou ajuste quando a stack mudar. |
 
 As decisões arquiteturais estão documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)**.

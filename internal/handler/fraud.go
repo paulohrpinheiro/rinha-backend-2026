@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"io"
 	"net/http"
 	"sync"
 
@@ -61,11 +62,21 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 	semaphore <- struct{}{}
 	defer func() { <-semaphore }()
 
-	// Decode binary payload directly (no json.Unmarshal, no allocations)
+	// Decode binary payload directly via DecodeBytes (no io.Reader blocking).
+	// Read r.Body once — http.Server's body reader respects Content-Length
+	// and returns exactly the proxy's binary payload (~130 bytes), no extra
+	// blocking reads. Then parse from the byte slice.
 	payload := payloadPool.Get().(*codec.Payload)
 	defer payloadPool.Put(payload)
 
-	if err := codec.DecodePayload(r.Body, payload); err != nil {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"cannot read body"}`))
+		return
+	}
+	if err := codec.DecodeBytes(bodyBytes, payload); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"invalid payload"}`))

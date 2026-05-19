@@ -163,10 +163,23 @@ func EncodePayload(w io.Writer, p *Payload) error {
 	return err
 }
 
+// DecodeBytes parses a binary payload from a byte slice into p.
+// Unlike DecodePayload, it never blocks on I/O — the caller reads
+// the body once (via io.ReadAll(r.Body)) and passes the bytes here.
+func DecodeBytes(data []byte, p *Payload) error {
+	return decodeFromBuffer(data, p)
+}
+
 // DecodePayload reads a binary payload from r into p.
-// The returned Payload references the internal read buffer for its string
-// fields (KnownMerchants, MerchantID, MCC). The buffer is stored in p.rawBuf
-// and is valid until the next call to DecodePayload with the same Payload.
+//
+// WARNING: reads up to MaxPayloadSize (4096 bytes) from r. On a
+// keep-alive Unix socket where the sender only sent ~130 bytes,
+// the extra Read calls block until ReadTimeout (~200ms), cascading
+// into scheduler thrashing and total system failure under load.
+//
+// Prefer DecodeBytes + io.ReadAll(r.Body) instead — http.Server's
+// body reader respects Content-Length and returns exactly the right
+// number of bytes without blocking.
 func DecodePayload(r io.Reader, p *Payload) error {
 	// Read the entire payload into a buffer (max 4KB for safety)
 	// In practice, payloads are ~80-130 bytes.
