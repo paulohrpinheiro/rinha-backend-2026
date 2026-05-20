@@ -2140,3 +2140,22 @@ superior ao codec binário. A simplificação do proxy (sem parsing, sem encode)
 reduziu HTTP errors em 67% e aumentou o throughput em 27%.
 
 **Estratégia para v36**: reduzir p99 abaixo de 2000ms. Alvo: score = −564.
+
+---
+
+## ADR-64: Timeouts 100ms para reduzir p99 (v36)
+
+**Contexto**: O v35 tem p99 = 2000.92ms — a apenas 0.92ms do corte de −3000.
+Se o p99 cair abaixo de 2000ms, o score final será −564 (detection_score sem
+corte). Timeouts mais curtos cortam requisições lentas mais rápido, liberando
+slots e reduzindo o p99 marginalmente.
+
+**Decisão**: Reduzir ReadHeaderTimeout, ReadTimeout e WriteTimeout de 200ms
+para 100ms no proxy e na API. 100ms ainda é 100.000× maior que o tempo real
+de processamento (<1μs), mas corta requisições presas no scheduler mais cedo.
+
+**Arquivos alterados**: `cmd/proxy/main.go`, `cmd/api/main.go`.
+
+**Consequências**:
+- Esperado: redução marginal do p99 (0.5-1.0ms), potencialmente abaixo de 2000ms.
+- Risco: timeouts falsos se o scheduler causar starvation >100ms.
