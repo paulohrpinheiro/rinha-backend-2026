@@ -178,8 +178,9 @@ por 5 minutos).
 | **v28** | **reverte timeouts 200ms (1 diff)** | **12.321** | **3.173** | 2002ms | **−6000** |
 | **v29** | **proxy 0.15 CPU (config v26)** | **9.840** | **11.765** | 2002ms | **−6000** |
 | **v30** | **semáforo 1024 (1 diff)** | **5.550** | **33.772** | **2001ms** | **−6000** |
+| **v31** | **nprobe=3 (recall)** | **6.873** | **17.806** | 2002ms | **−6000** |
 
-### Análise: isolação de variáveis confirma 2 fatores
+### Análise: nprobe=2 é superior a nprobe=3 sob carga
 
 | Métrica | v26 | v27 | v28 | v29 | v30 |
 |---------|:---:|:---:|:---:|:---:|:---:|
@@ -193,7 +194,7 @@ por 5 minutos).
 O v30 é o **melhor resultado da série**: 39.3k processados (+19% vs v26).
 Failure rate = 15.95% — a **0.95pp** de sair do corte de −3000.
 p99 = 2001.42ms — a **1.42ms** do corte.
-Com CPU e semáforo restaurados, o fator restante é **nprobe=2 vs 3**.
+v31 (nprobe=3) regrediu para 24.7k processados (-37% vs v30), confirmando que nprobe=2 é superior sob carga. Config ideal: proxy 0.15, semáforo 1024, nprobe=2.
 
 ### Lições Aprendidas
 

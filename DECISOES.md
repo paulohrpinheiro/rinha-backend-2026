@@ -1959,3 +1959,36 @@ corte de −3000 no detection_score.
 - Se failure_rate cair abaixo de 15%, score sobe de −6000 para −3000.
 - Se também reduzir o p99 abaixo de 2000ms, score pode virar positivo.
 - nprobe=3 é a configuração original do v26, que teve 27.100 corretos.
+
+---
+
+## ADR-58: nprobe=3 regrediu — nprobe=2 confirmado superior (v31→v32)
+
+**Contexto**: O v31 restaurou nprobe=3, último fator diferencial do v26.
+Hipótese: melhor recall reduziria FP/FN, baixando failure_rate abaixo de 15%.
+
+**Resultado oficial (v31, commit ad944ae)**:
+
+| Métrica | v30 (nprobe=2) | v31 (nprobe=3) | Delta |
+|---------|:------------:|:------------:|:-----:|
+| Processados | 39.322 | 24.679 | −37% |
+| Corretos | 33.052 | 17.437 | −47% |
+| FP+FN | 720 | 369 | −49% |
+| Failure rate | 15.95% | 29.34% | +13pp |
+
+O nprobe=3 melhorou o recall (−49% FP/FN), mas a latência extra de busca
+(~130μs vs ~90μs) acumulou sob carga, reduzindo o throughput em 37%.
+nprobe=2 é superior para throughput sob carga sustentada.
+
+**Configuração ótima**: proxy 0.15 CPU, semáforo 1024, nprobe=2 (v30).
+
+**Decisão para v32**: reverter nprobe para 2 + reduzir proxy client timeout
+de 500ms para 200ms. Hipótese: timeout mais curto corta requisições
+proxy→API lentas mais rápido, reduzindo HTTP errors.
+
+**Arquivos alterados**: `internal/index/index.go`, `cmd/proxy/main.go`.
+
+**Consequências**:
+- nprobe=2 é a configuração canônica para throughput.
+- Client timeout 200ms pode reduzir HTTP errors marginalmente.
+- v30 permanece o melhor resultado, v32 tenta o empurrão final.
