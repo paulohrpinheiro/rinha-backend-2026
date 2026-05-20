@@ -2040,3 +2040,45 @@ cmd/api/main.go. GOGC=off mantido.
 - GC mais frequente com limite de 60MiB — mas com GOGC=off e alocações
   mínimas no hot path (zero no codec, zero nas respostas), o impacto é baixo.
 - RSS menor pode ajudar o container a ficar dentro do limite de 165MB.
+
+---
+
+## ADR-61: Parsing JSON manual na API, proxy forwarda JSON bruto (v34)
+
+**Contexto**: O MELHORIAS.md §2 descreve parsing JSON byte-a-byte como
+alternativa de alto impacto ao codec binário. A referência Go (joycegodinho)
+usa essa técnica com zero alocações. Nosso codec binário tinha o mesmo
+efeito mas adicionava complexidade (400 linhas) e exigia que o proxy
+fizesse json.Unmarshal + encode binário (~337μs por requisição).
+
+**Decisão**: Substituir o codec binário de request por parsing JSON manual
+na API. O proxy agora forwarda o JSON bruto (sem json.Unmarshal, sem encode).
+A API faz parsing byte-a-byte via `parser.ParseJSON()`.
+
+Técnicas do parser:
+- Resolução de campos por tamanho da chave (6→"amount", 8→"customer")
+- `parseFloatFast()` sem strconv
+- Strings como slices do body original (`unsafe.String`) — zero cópia
+- Array fixo para known_merchants (32 posições)
+- Timestamp parsing manual (20 bytes RFC 3339 fixos)
+
+**Impacto no proxy**: elimina json.Unmarshal + codec.EncodePayload + 3 pools
+(jsonPayloadPool, codecPayloadPool, encodeBufPool). Proxy apenas copia o
+body para um buffer reutilizável e forwarda.
+
+**Impacto na API**: substitui `codec.DecodeBytes` (binário) por
+`parser.ParseJSON` (JSON textual). Latência similar (~130μs do parsing
+manual vs ~80μs do decode binário), mas elimina 400 linhas de codec e
+simplifica a arquitetura.
+
+**Arquivos alterados**: `internal/parser/json.go` (novo),
+`internal/handler/fraud.go`, `internal/vector/normalize.go`,
+`cmd/proxy/main.go`, `internal/handler/fraud_test.go`,
+`internal/vector/normalize_test.go`.
+
+**Consequências**:
+- Proxy CPU reduzida (sem parsing JSON) — mais requisições forwardadas.
+- API faz parsing JSON — leve aumento de latência compensado pela
+  simplificação.
+- Codec de request removido; codec de resposta (9 bytes) mantido.
+- Testes adaptados para enviar JSON.

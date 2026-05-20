@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"rinha-backend/internal/codec"
+	"rinha-backend/internal/parser"
 )
 
 var testNorm = &NormalizationConfig{
@@ -97,7 +97,7 @@ func TestManhattanDistance(t *testing.T) {
 }
 
 func TestNormalizeLegitTx(t *testing.T) {
-	payload := &codec.Payload{
+	payload := &parser.Payload{
 		Amount:         41.12,
 		Installments:   2,
 		RequestedAt:    time.Date(2026, 3, 11, 18, 45, 53, 0, time.UTC),
@@ -147,7 +147,7 @@ func TestNormalizeLegitTx(t *testing.T) {
 }
 
 func TestNormalizeFraudTx(t *testing.T) {
-	payload := &codec.Payload{
+	payload := &parser.Payload{
 		Amount:         9505.97,
 		Installments:   10,
 		RequestedAt:    time.Date(2026, 3, 14, 5, 15, 12, 0, time.UTC),
@@ -191,7 +191,7 @@ func TestNormalizeFraudTx(t *testing.T) {
 }
 
 func TestNormalizeLastTx(t *testing.T) {
-	payload := &codec.Payload{
+	payload := &parser.Payload{
 		Amount:         150.0,
 		Installments:   2,
 		RequestedAt:    time.Date(2026, 3, 14, 10, 30, 0, 0, time.UTC),
@@ -237,7 +237,7 @@ func TestNormalizeLastTx(t *testing.T) {
 }
 
 func TestNormalizeMissingMCC(t *testing.T) {
-	payload := &codec.Payload{
+	payload := &parser.Payload{
 		Amount:         100.0,
 		Installments:   1,
 		RequestedAt:    time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC),

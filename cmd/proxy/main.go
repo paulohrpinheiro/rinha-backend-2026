@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"rinha-backend/internal/codec"
-	"rinha-backend/internal/model"
 )
 
 // fraudResponses holds the 6 possible JSON responses pre-computed.
@@ -108,21 +107,8 @@ var bodyBufPool = sync.Pool{
 	New: func() any { return new(bytes.Buffer) },
 }
 
-// payloadPool reuses model.TransactionPayload for JSON parsing.
-var jsonPayloadPool = sync.Pool{
-	New: func() any { return new(model.TransactionPayload) },
-}
 
-// codecPayloadPool reuses codec.Payload for binary encoding.
-var codecPayloadPool = sync.Pool{
-	New: func() any { return new(codec.Payload) },
-}
 
-// encodeBufPool reuses bytes.Buffer for binary payload encoding,
-// avoiding allocation per request (~130 bytes each).
-var encodeBufPool = sync.Pool{
-	New: func() any { return new(bytes.Buffer) },
-}
 
 // proxySem limits concurrent proxy requests (non-blocking, 256 slots).
 // 256 slots provides enough headroom for bursts while keeping scheduler
@@ -159,7 +145,7 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	idx := p.counter.Add(1) % uint64(len(p.backends))
 	backend := p.backends[idx]
 
-	// 3. Read body into reusable buffer
+		// 3. Read body into reusable buffer (forward JSON, zero parsing)
 	bodyBuf := bodyBufPool.Get().(*bytes.Buffer)
 	bodyBuf.Reset()
 	if _, err := io.Copy(bodyBuf, r.Body); err != nil {
@@ -168,69 +154,23 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot read body", http.StatusInternalServerError)
 		return
 	}
-	bodyBytes := bodyBuf.Bytes()
 
-	// 4. Parse JSON (proxy does this — API gets binary)
-	jsonPayload := jsonPayloadPool.Get().(*model.TransactionPayload)
-	defer jsonPayloadPool.Put(jsonPayload)
-	if err := json.Unmarshal(bodyBytes, jsonPayload); err != nil {
-		proxyCounters.ParseErrors.Add(1)
-		bodyBufPool.Put(bodyBuf)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"invalid JSON"}`))
-		return
-	}
-	bodyBufPool.Put(bodyBuf)
-
-	// 5. Convert to codec.Payload (flat struct for binary encoding)
-	cp := codecPayloadPool.Get().(*codec.Payload)
-	defer codecPayloadPool.Put(cp)
-
-	cp.Amount = jsonPayload.Transaction.Amount
-	cp.Installments = jsonPayload.Transaction.Installments
-	cp.RequestedAt = jsonPayload.Transaction.RequestedAt
-	cp.AvgAmount = jsonPayload.Customer.AvgAmount
-	cp.TxCount24h = jsonPayload.Customer.TxCount24h
-	cp.KnownMerchants = jsonPayload.Customer.KnownMerchants
-	cp.MerchantID = jsonPayload.Merchant.ID
-	cp.MCC = jsonPayload.Merchant.MCC
-	cp.MerchantAvgAmount = jsonPayload.Merchant.AvgAmount
-	cp.IsOnline = jsonPayload.Terminal.IsOnline
-	cp.CardPresent = jsonPayload.Terminal.CardPresent
-	cp.KmFromHome = jsonPayload.Terminal.KmFromHome
-	cp.HasLastTransaction = jsonPayload.LastTransaction != nil
-	if cp.HasLastTransaction {
-		cp.LastTimestamp = jsonPayload.LastTransaction.Timestamp
-		cp.LastKmFromCurrent = jsonPayload.LastTransaction.KmFromCurrent
-	}
-
-	// 6. Encode binary payload into pooled buffer
-	binBuf := encodeBufPool.Get().(*bytes.Buffer)
-	binBuf.Reset()
-	if err := codec.EncodePayload(binBuf, cp); err != nil {
-		proxyCounters.EncodeErrors.Add(1)
-		encodeBufPool.Put(binBuf)
-		http.Error(w, "encode error", http.StatusInternalServerError)
-		return
-	}
-
-	// 7. Build backend request with binary body
+	// 4. Build backend request with raw JSON body
 	targetURL := backend + r.URL.Path
-	breq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, binBuf)
+	breq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bodyBuf)
 	if err != nil {
 		proxyCounters.BadGatewayErrors.Add(1)
-		encodeBufPool.Put(binBuf)
+		bodyBufPool.Put(bodyBuf)
 		http.Error(w, "cannot create request", http.StatusInternalServerError)
 		return
 	}
-	breq.Header.Set("Content-Type", "application/octet-stream")
-	breq.ContentLength = int64(binBuf.Len())
+	breq.Header.Set("Content-Type", "application/json")
+	breq.ContentLength = int64(bodyBuf.Len())
 
-	// 8. Send to backend via http.Client (Unix socket transport)
+	// 5. Send to backend
 	proxyCounters.RequestsForwarded.Add(1)
 	resp, err := p.client.Do(breq)
-	encodeBufPool.Put(binBuf) // buffer consumed by http.NewRequestWithContext
+	bodyBufPool.Put(bodyBuf)
 	if err != nil {
 		proxyCounters.BackendErrors.Add(1)
 		http.Error(w, "backend error", http.StatusBadGateway)
@@ -238,10 +178,9 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// 9. Check for API-level errors
+	// 6. Check for API-level errors
 	if resp.StatusCode != http.StatusOK {
 		proxyCounters.APIErrors.Add(1)
-		// Read error body and forward as JSON
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
@@ -249,7 +188,7 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 10. Decode binary response (9 bytes)
+	// 7. Decode binary response (9 bytes)
 	binResp, err := codec.DecodeResponse(resp.Body)
 	if err != nil {
 		proxyCounters.DecodeErrors.Add(1)
@@ -259,14 +198,12 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	proxyCounters.ResponsesReceived.Add(1)
 
-	// 11. Write pre-allocated JSON response (zero serialization)
 	fraudCount := int(math.Round(binResp.FraudScore * 5))
 	if fraudCount < 0 {
 		fraudCount = 0
 	} else if fraudCount > 5 {
 		fraudCount = 5
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(fraudResponses[fraudCount])

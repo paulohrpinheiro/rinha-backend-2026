@@ -11,6 +11,7 @@ import (
 
 	"rinha-backend/internal/codec"
 	"rinha-backend/internal/index"
+	"rinha-backend/internal/parser"
 	"rinha-backend/internal/vector"
 )
 
@@ -36,7 +37,7 @@ var apiCounters APICounters
 // (rawBuf, KnownMerchants slice) across requests, avoiding allocations.
 var payloadPool = sync.Pool{
 	New: func() any {
-		return new(codec.Payload)
+		return new(parser.Payload)
 	},
 }
 
@@ -99,7 +100,7 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Decode binary payload directly via DecodeBytes (no io.Reader blocking).
-	payload := payloadPool.Get().(*codec.Payload)
+	payload := payloadPool.Get().(*parser.Payload)
 	defer payloadPool.Put(payload)
 
 	bodyBytes, err := io.ReadAll(r.Body)
@@ -110,7 +111,7 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"error":"cannot read body"}`))
 		return
 	}
-	if err := codec.DecodeBytes(bodyBytes, payload); err != nil {
+	if err := parser.ParseJSON(bodyBytes, payload); err != nil {
 		apiCounters.DecodeErrors.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -163,7 +164,7 @@ func (h *FraudHandler) Warmup() {
 	log.Print("Warming up IVF index...")
 	start := time.Now()
 
-	payloads := []codec.Payload{
+	payloads := []parser.Payload{
 		// in_person, card present, with last_transaction
 		{Amount: 384.88, Installments: 3, RequestedAt: time.Now(),
 			AvgAmount: 769.76, TxCount24h: 3,

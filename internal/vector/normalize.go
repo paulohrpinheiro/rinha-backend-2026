@@ -5,7 +5,7 @@ package vector
 import (
 	"math"
 
-	"rinha-backend/internal/codec"
+	"rinha-backend/internal/parser"
 )
 
 // Vector14 is a 14-dimensional vector quantized to int8.
@@ -147,7 +147,7 @@ type NormalizationConfig struct {
 // Normalize converts a binary-decoded transaction payload into a quantized
 // 14-dimensional vector. It accepts *codec.Payload directly (zero allocations
 // for JSON strings).
-func Normalize(payload *codec.Payload, norm *NormalizationConfig) Vector14 {
+func Normalize(payload *parser.Payload, norm *NormalizationConfig) Vector14 {
 	var v Vector14
 
 	// dim0: amount (clamped to [0,1], then quantized)
