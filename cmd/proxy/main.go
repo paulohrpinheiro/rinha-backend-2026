@@ -370,7 +370,7 @@ func main() {
 		backends: rawBackends,
 		client: &http.Client{
 			Transport: proxyTransport,
-			Timeout:   800 * time.Millisecond,
+			Timeout:   500 * time.Millisecond,
 		},
 	}
 
@@ -392,9 +392,9 @@ func main() {
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           mux,
-		ReadHeaderTimeout: 500 * time.Millisecond,
-		ReadTimeout:       500 * time.Millisecond,
-		WriteTimeout:      500 * time.Millisecond,
+		ReadHeaderTimeout: 200 * time.Millisecond,
+		ReadTimeout:       200 * time.Millisecond,
+		WriteTimeout:      200 * time.Millisecond,
 		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    4096,
 	}
