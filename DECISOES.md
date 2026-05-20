@@ -2159,3 +2159,28 @@ de processamento (<1μs), mas corta requisições presas no scheduler mais cedo.
 **Consequências**:
 - Esperado: redução marginal do p99 (0.5-1.0ms), potencialmente abaixo de 2000ms.
 - Risco: timeouts falsos se o scheduler causar starvation >100ms.
+
+---
+
+## ADR-65: v36 regrediu — timeouts 100ms pioram (v37 reverte + proxy 0.17)
+
+**Contexto**: O v36 reduziu timeouts para 100ms na tentativa de baixar o p99
+de 2000.92ms para <2000ms. O resultado foi o oposto:
+
+| Métrica | v35 (200ms) | v36 (100ms) |
+|---------|:----------:|:----------:|
+| HTTP errors | 1.812 | 7.709 (+325%) |
+| Failure rate | 5.74% | 17.73% |
+| p99 | 2000.92ms | 2001.21ms |
+| Score | −3564 | **−6000** |
+
+**Decisão**: Reverter timeouts para 200ms e tentar outra abordagem: aumentar
+proxy CPU para 0.17 (tirando 0.01 de cada API: 0.425→0.415). Como o proxy
+agora faz forward bruto (sem parsing), o ganho pode ser marginal, mas 0.02
+CPU extra pode ser suficiente para baixar o p99 em <1ms.
+
+**Arquivos alterados**: `cmd/proxy/main.go`, `cmd/api/main.go`,
+`docker-compose.yml`, `docker-compose.submission.yml`.
+
+**Consequências**:
+- v37 ≡ v35 (timeouts 200ms) + proxy 0.17 CPU.

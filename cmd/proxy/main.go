@@ -329,9 +329,9 @@ func main() {
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           mux,
-		ReadHeaderTimeout: 100 * time.Millisecond,
-		ReadTimeout:       100 * time.Millisecond,
-		WriteTimeout:      100 * time.Millisecond,
+		ReadHeaderTimeout: 200 * time.Millisecond,
+		ReadTimeout:       200 * time.Millisecond,
+		WriteTimeout:      200 * time.Millisecond,
 		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    4096,
 	}
