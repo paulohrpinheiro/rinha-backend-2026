@@ -176,20 +176,21 @@ por 5 minutos).
 | **v26** | **K-means corrigido + nprobe=3** | 5.400 | **27.686** | 2002ms | −6000 |
 | **v27** | **diag + CPU 0.10 + timeouts 500ms + semaf 256 + nprobe=2** | **10.006** | **8.955** | 2002ms | **−6000** |
 | **v28** | **reverte timeouts 200ms (1 diff)** | **12.321** | **3.173** | 2002ms | **−6000** |
+| **v29** | **proxy 0.15 CPU (config v26)** | **9.840** | **11.765** | 2002ms | **−6000** |
 
-### Análise: CPU do proxy é o gargalo
+### Análise: CPU do proxy é o gargalo (confirmado)
 
-| Métrica | v26 (p=0.15) | v27 (p=0.10) | v28 (p=0.10) |
-|---------|:-----------:|:-----------:|:-----------:|
-| HTTP errors | 5.400 | 10.006 | 12.321 |
-| Processados | 33.086 | 18.961 | 15.494 |
-| Fantasmas | 21.014 | 35.139 | 38.606 |
-| Failure rate | 18.09% | 53.88% | 79.99% |
+| Métrica | v26 (p=0.15) | v27 (p=0.10) | v28 (p=0.10) | v29 (p=0.15) |
+|---------|:-----------:|:-----------:|:-----------:|:-----------:|
+| HTTP errors | 5.400 | 10.006 | 12.321 | 9.840 |
+| Corretos (TP+TN) | 27.100 | 8.744 | 3.101 | 11.503 |
+| Processados | 33.086 | 18.961 | 15.494 | 21.605 |
+| Fantasmas | 21.014 | 35.139 | 38.606 | 32.495 |
+| Failure rate | 18.09% | 53.88% | 79.99% | 46.76% |
 
-A cada redução de CPU no proxy, o throughput cai ~40%. O proxy com 0.10 CPU
-não consegue sustentar parsing JSON + encode binário + forward a 180 req/s.
-A evidência dos 3 resultados oficiais aponta que **o proxy é o gargalo
-principal**, e a CPU alocada a ele é o fator determinante do throughput.
+O v29 confirma que a CPU do proxy é relevante (21.6k vs 15.5k do v28, +39%),
+mas ainda 35% abaixo do v26 (33.1k) com a mesma CPU. Diferenças restantes:
+semáforo 256 (v26 usava 1024) e nprobe=2 (v26 usava 3).
 
 ### Lições Aprendidas
 

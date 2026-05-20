@@ -18,7 +18,7 @@ import (
 // 256 slots provides headroom for bursts while keeping scheduler pressure low
 // with GOMAXPROCS=1. At steady state (~25 concurrent, 130μs each), max queue
 // depth is ~33ms.
-var semaphore = make(chan struct{}, 256)
+var semaphore = make(chan struct{}, 1024)
 
 // APICounters tracks internal metrics for diagnosing where requests are lost.
 type APICounters struct {

@@ -1916,3 +1916,25 @@ do v26 (~33k processados) ou superior (já que as outras melhorias do v27
 - Se o v29 ainda falhar, há outro fator não identificado.
 - Esta é a última hipótese de tuning — se falhar, partir para mudanças
   estruturais (fasthttp, fd-passing) conforme MELHORIAS.md.
+
+---
+
+## ADR-56: Semáforo 1024 restaurando capacidade do v26 (v30)
+
+**Contexto**: O v29 restaurou a CPU do proxy (0.15) e melhorou o throughput
+de 15.5k para 21.6k (+39% vs v28), mas ainda 35% abaixo do v26 (33.1k).
+As diferenças restantes entre v29 e v26 são: semáforo 256 (v26 usava 1024)
+e nprobe=2 (v26 usava 3).
+
+**Decisão**: Restaurar o semáforo para 1024 slots (não-bloqueante) no proxy
+e na API, mesmo valor do v26. Hipótese: com proxy 0.15 CPU, mais requisições
+chegam às APIs, e o semáforo 256 pode estar rejeitando requisições em rajadas
+do k6 que o semáforo 1024 absorveria.
+
+**Arquivos alterados**: `cmd/proxy/main.go`, `internal/handler/fraud.go`.
+
+**Consequências**:
+- Se o throughput subir para ≥30k, o semáforo 256 era o fator limitante.
+- Se permanecer em ~21k, o fator restante é nprobe=2 vs 3.
+- O benchmark local não diferencia (ambos passam com p99 ~3ms),
+  então a validação depende do teste oficial.

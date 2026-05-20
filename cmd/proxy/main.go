@@ -128,7 +128,7 @@ var encodeBufPool = sync.Pool{
 // 256 slots provides enough headroom for bursts while keeping scheduler
 // pressure low with GOMAXPROCS=1. At steady state (~25 concurrent),
 // max queue depth is ~33ms (256 × 130μs).
-var proxySem = make(chan struct{}, 256)
+var proxySem = make(chan struct{}, 1024)
 
 // RoundRobinProxy handles POST /fraud-score: parses JSON, encodes to binary,
 // forwards to an API, decodes binary response, returns JSON.
