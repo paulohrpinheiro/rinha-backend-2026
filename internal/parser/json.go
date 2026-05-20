@@ -54,10 +54,12 @@ func ParseJSON(body []byte, p *Payload) error {
 				if body[keyStart] == 'a' { v, n := parseFloat(body, pos); p.Amount = v; pos = n } else { pos = skipValue(body, pos) }
 			case 12: // "installments"
 				if body[keyStart] == 'i' { v, n := parseInt(body, pos); p.Installments = v; pos = n } else { pos = skipValue(body, pos) }
-			case 13: // "requested_at"
-				if body[keyStart] == 'r' { ts, n := parseTimestamp(body, pos); p.RequestedAt = ts; pos = n } else { pos = skipValue(body, pos) }
-			case 11: // "tx_count_24h" or "merchant_id"
-				if body[keyStart] == 't' { v, n := parseInt(body, pos); p.TxCount24h = v; pos = n } else { pos = skipValue(body, pos) }
+			case 11: // "transaction" (object) or "merchant_id"
+				if body[keyStart] == 't' && body[pos] == '{' {
+					pos = parseTransaction(body, pos, p)
+				} else {
+					pos = skipValue(body, pos)
+				}
 			case 8: // "customer", "merchant", "terminal"
 				switch body[keyStart] {
 				case 'c': pos = parseCustomer(body, pos, p, &knownBuf, &knownCount)
@@ -83,6 +85,42 @@ func ParseJSON(body []byte, p *Payload) error {
 	return nil
 }
 
+
+func parseTransaction(body []byte, pos int, p *Payload) int {
+	pos = skipTo(body, pos, '{') + 1
+	depth := 1
+	for pos < len(body) && depth > 0 {
+		c := body[pos]
+		switch c {
+		case '}': depth--; pos++
+		case '{': depth++; pos++
+		case '"':
+			keyStart := pos + 1
+			keyEnd := findQuote(body, keyStart)
+			if keyEnd < 0 { return len(body) }
+			keyLen := keyEnd - keyStart
+			pos = keyEnd + 1
+			pos = skipTo(body, pos, ':') + 1
+			pos = skipWhitespace(body, pos)
+			switch keyLen {
+			case 6: // "amount"
+				v, n := parseFloat(body, pos); p.Amount = v; pos = n
+			case 12: // "installments" or "requested_at"
+				if body[keyStart] == 'i' {
+					v, n := parseInt(body, pos); p.Installments = v; pos = n
+				} else {
+					ts, n := parseTimestamp(body, pos); p.RequestedAt = ts; pos = n
+				}
+			default: pos = skipValue(body, pos)
+			}
+			pos = skipToCommaOrClose(body, pos)
+		case ',', '\n', '\r', ' ', '\t': pos++
+		default: pos++
+		}
+	}
+	return pos
+}
+
 func parseCustomer(body []byte, pos int, p *Payload, knownBuf *[32]string, knownCount *int) int {
 	pos = skipTo(body, pos, '{') + 1
 	depth := 1
@@ -102,7 +140,7 @@ func parseCustomer(body []byte, pos int, p *Payload, knownBuf *[32]string, known
 			switch keyLen {
 			case 10: // "avg_amount"
 				v, n := parseFloat(body, pos); p.AvgAmount = v; pos = n
-			case 11: // "tx_count_24h"
+			case 12: // "tx_count_24h"
 				v, n := parseInt(body, pos); p.TxCount24h = v; pos = n
 			case 15: // "known_merchants"
 				pos = parseKnownMerchants(body, pos, knownBuf, knownCount)

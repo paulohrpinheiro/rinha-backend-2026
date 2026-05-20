@@ -2082,3 +2082,28 @@ simplifica a arquitetura.
   simplificação.
 - Codec de request removido; codec de resposta (9 bytes) mantido.
 - Testes adaptados para enviar JSON.
+
+---
+
+## ADR-62: Correção de keyLen no parser JSON (v35)
+
+**Contexto**: O v34 tinha 10.598 falsos negativos — o parser não detectava fraude.
+Dois bugs de contagem de caracteres nas chaves JSON:
+
+1. `tx_count_24h` = 12 caracteres, não 11. O parseCustomer usava `case 11`,
+   nunca capturando o campo. TxCount24h ficava sempre 0.
+2. `requested_at` = 12 caracteres, não 13. O parseTransaction usava
+   `case 13`, nunca capturando o campo. RequestedAt ficava sempre zero.
+
+**Decisão**: Corrigir os keyLens no parser:
+- parseCustomer: `case 11` → `case 12` para tx_count_24h
+- parseTransaction: consolidar `case 12` (installments) e `case 13` (requested_at)
+  em um único `case 12` com disambiguador pela primeira letra ('i' vs 'r')
+- Parser principal: remover `case 13` (não existe chave de 13 caracteres no
+  nível raiz), simplificar `case 11` (apenas "transaction", não "tx_count_24h")
+
+**Arquivos alterados**: `internal/parser/json.go`.
+
+**Consequências**:
+- TxCount24h e RequestedAt agora são parseados corretamente.
+- FN deve cair de 10.598 para ~350 (patamar normal do v30).
