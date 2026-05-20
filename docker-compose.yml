@@ -4,10 +4,7 @@ volumes:
 
 services:
   proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile.proxy
-    image: rinha-backend-proxy:latest
+    image: paulohrpinheiro/rinha-proxy:v28
     ports:
       - "9999:9999"
     environment:
@@ -31,10 +28,7 @@ services:
 
   api-1:
     hostname: api-1
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    image: rinha-backend-api:latest
+    image: paulohrpinheiro/rinha-api:v28
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
@@ -53,10 +47,7 @@ services:
 
   api-2:
     hostname: api-2
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    image: rinha-backend-api:latest
+    image: paulohrpinheiro/rinha-api:v28
     environment:
       - PORT=8080
       - RESOURCES_DIR=/resources
@@ -73,8 +64,7 @@ services:
           cpus: "0.45"
           memory: "165MB"
 
-  # warmup removed: warmup now runs inline in the API binary after loading the IVF index
-  # (see handler.Warmup() in internal/handler/fraud.go)
+# warmup removed: runs inline in the API binary (handler.Warmup())
 
 networks:
   rinha-net:
