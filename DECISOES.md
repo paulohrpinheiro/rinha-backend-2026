@@ -1794,6 +1794,55 @@ interno do `bytes.Buffer`.
 
 ---
 
+## ADR-53: Regressão v27 — lições da submissão com 6 mudanças simultâneas
+
+**Contexto**: O v27 aplicou 6 mudanças simultâneas (ADRs 46-51) sobre o v26:
+timeouts 500ms (eram 100-200ms), CPU proxy 0.10 (era 0.15), semáforo 256
+(era 1024), proxy client timeout 800ms (era 500ms), nprobe=2 (era 3) e warmup
+expandido.
+
+O benchmark local com `ab` (10k reqs, conc=100) mostrou p99 de 398ms com zero
+falhas — levando à expectativa de score positivo. O resultado oficial foi o oposto:
+
+| Métrica | v26 | v27 | Delta |
+|---------|-----|-----|-------|
+| HTTP errors | 5.400 | 10.006 | +85% |
+| TP+TN | 27.100 | 8.744 | −68% |
+| Processados | 33.086 | 18.961 | −43% |
+| Fantasmas | 21.014 | 35.139 | +67% |
+| Failure rate | 18.09% | 53.88% | +198% |
+| Score | −6000 | −6000 | — |
+
+**Causa raiz — não é possível isolar**: as 6 mudanças foram aplicadas juntas,
+impossibilitando identificar qual(is) causou(aram) a regressão.
+
+**Hipóteses**:
+1. **Timeouts 500ms**: provável causa principal — requisições problemáticas
+   ocupam slots por 2.5× mais tempo, agravando o cascade.
+2. **Proxy 0.10 CPU**: proxy perdeu 33% de CPU. Parsing JSON + encode binário
+   + forward podem ser inviáveis com 0.10 sob 180 req/s.
+3. **Semáforo 256**: mais 503s sob rajadas do k6.
+4. **Proxy client timeout 800ms**: proxy espera mais tempo por APIs
+   sobrecarregadas, acumulando goroutines.
+
+**Lição**: uma mudança por submissão. O método científico exige isolar
+variáveis — múltiplas mudanças simultâneas impedem atribuição causal.
+
+**Lição**: benchmark local não prevê resultado oficial. O `ab` com rajadas
+curtas não reproduz o ramp-up sustentado do k6 (180 req/s por 5 minutos).
+
+**Estratégia para v28**: reverter para a base v26 e aplicar UMA mudança
+por vez, começando pela mais provável (timeouts).
+
+**Arquivos alterados**: nenhum (ADR de lição aprendida).
+
+**Consequências**:
+- Próximas submissões devem ter exatamente 1 diff em relação à anterior.
+- O benchmark local continua útil como smoke test (verifica que o sistema
+  funciona), mas NÃO como preditor de score.
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões

@@ -100,54 +100,81 @@ README.md              # Este arquivo
 
 ## Resultados do Teste Oficial (Evolução)
 
-> Última submissão: v27 (commit `ddb5508`) · Docker Hub: `paulohrpinheiro/rinha-proxy:v27` + `rinha-api:v27`
+> Última submissão: v27 (commit `df0c7cd`) · Score: **−6000** (regressão vs v26)
+> Docker Hub: `paulohrpinheiro/rinha-proxy:v27` + `rinha-api:v27`
 
-### Benchmark local v27
+### Resultado oficial v27
+
+| Componente | Valor | Corte |
+|:-----------|:-----:|:-----:|
+| `score_p99` | **−3000** | p99 = 2002.07ms > 2000ms |
+| `score_det` | **−3000** | failure_rate = 53.88% > 15% |
+| **Final** | **−6000** | Piso absoluto |
+
+| Métrica | v27 | v26 | Delta |
+|:--------|:---:|:---:|:-----:|
+| HTTP errors | 10.006 | 5.400 | **+85% ❌** |
+| TP + TN (corretos) | 8.744 | 27.100 | **−68% ❌** |
+| FP + FN (erros) | 211 | 586 | −64% ✅ |
+| Processados (total) | 18.961 | 33.086 | **−43% ❌** |
+| Fantasmas (perdidos) | 35.139 | 21.014 | **+67% ❌** |
+| Precisão | 97.6% | 97.9% | estável |
+| Failure rate | 53.88% | 18.09% | **+198% ❌** |
+| p99 | 2002.07ms | 2001.77ms | estável |
+| Score | −6000 | −6000 | estável |
+
+### Análise da regressão v26→v27
+
+O v27 teve **regressão em quase todas as métricas** comparado ao v26.
+Apenas a precisão das detecções (FP/FN) melhorou — mas irrelevante quando
+o throughput caiu 43%.
+
+**Hipóteses para a regressão** (6 mudanças simultâneas, difícil isolar):
+
+1. **Timeouts 500ms (eram 100-200ms)**: provável causa principal. Timeouts mais
+   longos significam que requisições problemáticas ocupam slots por 2.5× mais tempo,
+   agravando o cascade sob carga. Com 200ms, uma requisição lenta é cortada rápido;
+   com 500ms, ela segura o slot, bloqueia o semáforo, e causa mais timeouts no proxy.
+
+2. **Proxy 0.10 CPU (era 0.15)**: o proxy perdeu 33% de CPU. Com parsing JSON +
+   encode binário + forward, 0.10 pode ser insuficiente para sustentar 180 req/s.
+
+3. **Semáforo 256 (era 1024)**: mais 503s sob rajadas. Embora 256 seja suficiente
+   em regime (~25 slots), rajadas do k6 podem estourar e rejeitar requisições.
+
+4. **Proxy client timeout 800ms (era 500ms)**: combinado com timeouts internos de
+   500ms, o proxy espera mais tempo por APIs sobrecarregadas, acumulando goroutines.
+
+5. **nprobe=2 (era 3)**: provavelmente NÃO é o culpado — a precisão melhorou e
+   a latência de busca caiu. Mas a perda de recall pode ter aumentado search_errors.
+
+**Lição principal**: otimizações locais não se traduzem em melhoria sistêmica
+sob carga sustentada (180 req/s × 5 min). O benchmark local com `ab` (rajadas
+curtas) não reproduz o padrão de ramp-up do k6.
+
+### Benchmark local v27 (pré-submissão)
 
 | Carga | Concorrência | Req/s | p99 | Falhas |
 |:------|:-----------:|:-----:|:---:|:------:|
 | 2.000 | 50 | 570–640 | 203–298ms | **0** |
 | 10.000 | 100 | 560–613 | 398–420ms | **0** |
 
-Zero erros em todas as 17 categorias de contadores. Round-robin perfeitamente balanceado (50/50).
+⚠️ O benchmark local NÃO previu a regressão. O `ab` com 50-100 concorrentes
+não reproduz o padrão de carga sustentada do k6 (ramp-up + 180 req/s constante
+por 5 minutos).
 
-### Evolução completa (oficial + local)
+### Evolução completa (resultados oficiais)
 
-| Versão | Mudança chave | Erros HTTP | OK | p99 | Score |
-|:------|:-------------|:----------:|:---:|:---:|:-----:|
+| Versão | Mudança chave | Erros HTTP | Detectados | p99 | Score |
+|:------|:-------------|:----------:|:----------:|:---:|:-----:|
 | v10 | TCP, httputil, sem timeouts | 13.858 | 0 | 2002ms | −6000 |
 | v16 | codec binário | 52.601 | 1.370 | 1042ms | −3018 |
 | v17 | Unix sockets | 53.370 | 599 | **1066ms** | −3028 |
 | v20 | proxy custom, semáforo 16 (503) | 50.368 | 3.691 | 501ms | −2700 |
 | v21 | semáforo removido | 49.706 | 326 | 2002ms | −6000 |
 | v24 | DecodeBytes fix | 44.800 | 329 | 2002ms | −6000 |
-| **v26** | **K-means corrigido + nprobe=3** | **5.400** | **27.100** | **2002ms** | **−6000** |
-| **v27** | **diag + CPU 0.10/0.45 + timeouts 500ms + semaf 256 + nprobe=2** | **—** | **—** | **—** | **aguardando** |
-
-### v26 → v27: a virada
-
-O v26 provou que o sistema funciona (27.100 detecções corretas, precisão 97.9%), mas dois cortes rígidos travavam o score em −6000: p99 a 0.23ms do corte de 2000ms e 21k requisições "fantasmas" inflando o failure_rate para 18.09%.
-
-O v27 ataca ambos com 6 mudanças simultâneas:
-- **Contadores de diagnóstico** (ADR-46) para visibilidade total do pipeline
-- **CPU redistribuída** (ADR-47) para a config do v17 — única com p99 < 2000ms
-- **Timeouts relaxados** (ADR-48) de 100/200ms para 500ms, eliminando falsos timeouts
-- **Semáforo 256** (ADR-49) em vez de 1024, reduzindo pressão no scheduler
-- **nprobe=2** (ADR-50) em vez de 3, reduzindo latência de busca em 30%
-- **Warmup 64×** (ADR-51) em vez de 16×, aquecendo mais clusters
-
-### Comparativo com o melhor concorrente
-
-| Métrica | Best (MXLange C) | v26 (oficial) | v27 (local) |
-|:--------|:----------------:|:------------:|:-----------:|
-| p99 | **0.98ms** | 2001.77ms | **398ms** |
-| Erros HTTP | **0** | 5.400 | **0** |
-| TP | 24.037 | 11.972 | — |
-| TN | 30.022 | 15.128 | — |
-| FP | **0** | 297 | — |
-| FN | **0** | 289 | — |
-| Failure rate | **0%** | 18.09% | **0%** |
-| Score final | **+6000** | **−6000** | **aguardando**
+| **v26** | **K-means corrigido + nprobe=3** | 5.400 | **27.686** | 2002ms | −6000 |
+| **v27** | **diag + CPU 0.10 + timeouts 500ms + semaf 256 + nprobe=2** | **10.006** | **8.955** | 2002ms | **−6000** |
 
 ### Lições Aprendidas
 
@@ -162,7 +189,8 @@ O v27 ataca ambos com 6 mudanças simultâneas:
 | 🐛 **Semáforo bloqueante foi o pior de todos** | v20 (não-bloqueante 16, 503) processou 3.691 reqs. v24 (bloqueante 128 + DecodeBytes) processou 329. O bloqueante é pior que não ter semáforo. A chave é capacidade folgada + não-bloqueante. |
 | 🎯 **Semáforo não-bloqueante 1024 + respostas pré-alocadas + warmup** | Combinação que resolve os problemas de v20-24: não-bloqueante com folga elimina cascade, resposta pronta evita serialização, warmup aquece caches. |
 | 🧹 **Revisar ADRs obsoletos** | ADRs que resolviam problemas de versões anteriores podem virar o próprio problema. Remova ou ajuste quando a stack mudar. |
-| 📈 **Benchmark local ≠ teste oficial** | v26 teve p99=97ms local e 2001ms oficial. A diferença está no ramp-up do k6 (180 req/s sustentado por 5min) vs rajadas curtas do ab. |
+| 📈 **Benchmark local ≠ teste oficial** | v27 teve p99=398ms local e 2002ms oficial. O `ab` com rajadas curtas não reproduz carga sustentada por 5 minutos. |
+| 🧪 **Uma mudança por submissão** | v27 aplicou 6 mudanças simultâneas. Impossível isolar qual causou a regressão de 43% no throughput. |
 | 🔬 **Diagnóstico é tão importante quanto otimização** | Sem contadores (ADR-46), as 21k requisições "fantasmas" do v26 eram invisíveis. Adicionar `/debug/vars` em proxy e APIs revelou exatamente onde cada requisição estava. |
 | 🎛️ **Timeouts muito curtos causam falsos timeouts** | Com GOMAXPROCS=1 e 180 req/s, uma goroutine pode esperar >100ms pelo scheduler. Timeout de 100ms dispara antes do processamento começar. |
 | ⚖️ **Capacidade do semáforo é uma curva em U** | 16 slots (v20): muitos 503. 128 bloqueante (v24): cascade. 1024 (v26): scheduler thrashing. 256 (v27): equilíbrio. |
