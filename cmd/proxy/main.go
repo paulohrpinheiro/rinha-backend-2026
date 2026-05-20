@@ -370,7 +370,7 @@ func main() {
 		backends: rawBackends,
 		client: &http.Client{
 			Transport: proxyTransport,
-			Timeout:   200 * time.Millisecond,
+			Timeout:   500 * time.Millisecond,
 		},
 	}
 

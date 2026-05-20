@@ -179,8 +179,9 @@ por 5 minutos).
 | **v29** | **proxy 0.15 CPU (config v26)** | **9.840** | **11.765** | 2002ms | **−6000** |
 | **v30** | **semáforo 1024 (1 diff)** | **5.550** | **33.772** | **2001ms** | **−6000** |
 | **v31** | **nprobe=3 (recall)** | **6.873** | **17.806** | 2002ms | **−6000** |
+| **v32** | **nprobe=2 + client timeout 200ms** | **8.951** | **22.781** | 2002ms | **−6000** |
 
-### Análise: nprobe=2 é superior a nprobe=3 sob carga
+### Conclusão: tuning de parâmetros chegou ao limite
 
 | Métrica | v26 | v27 | v28 | v29 | v30 |
 |---------|:---:|:---:|:---:|:---:|:---:|

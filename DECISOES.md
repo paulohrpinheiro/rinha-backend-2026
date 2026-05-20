@@ -1992,3 +1992,30 @@ proxy→API lentas mais rápido, reduzindo HTTP errors.
 - nprobe=2 é a configuração canônica para throughput.
 - Client timeout 200ms pode reduzir HTTP errors marginalmente.
 - v30 permanece o melhor resultado, v32 tenta o empurrão final.
+
+---
+
+## ADR-59: Tuning de parâmetros chegou ao limite (v30→v32)
+
+**Contexto**: A partir do v30 (melhor resultado: 39.3k processados, 15.95%
+failure_rate), 5 tentativas de 1-diff foram testadas. Todas regrediram:
+
+| Versão | Mudança | Processados | vs anterior |
+|--------|---------|:----------:|:----------:|
+| v30 | baseline | 39.322 | — |
+| v31 | nprobe=3 | 24.679 | −37% |
+| v32 | client timeout 200ms | 31.732 | +29% (vs v31), −19% (vs v30) |
+
+O v30 continua sendo o melhor. Nenhuma micro-otimização de parâmetros
+(timeouts, nprobe, semáforo) conseguiu melhorá-lo.
+
+**Decisão**: Encerrar a fase de tuning de parâmetros. O caminho para sair
+do score negativo requer mudanças estruturais, conforme MELHORIAS.md:
+- fasthttp no proxy (zero alocações, body como []byte direto)
+- Parsing JSON manual na API (elimina codec binário)
+- fd-passing (elimina proxy como gargalo)
+
+**Consequências**:
+- v30 é a configuração canônica de parâmetros.
+- Próximas versões devem manter os parâmetros do v30 e focar em mudanças
+  estruturais, uma de cada vez.
