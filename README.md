@@ -14,9 +14,9 @@ Client -> Proxy -> API #1 e API #2 (round-robin)
 
 | Serviço | CPU | Memória | Função |
 |---------|:---:|:-------:|--------|
-| proxy   | 0.15 | 20 MB | Load balancer round-robin + /ready + JSON→binário |
-| api-1   | 0.425 | 165 MB | Detecção de fraude (IVF, protocolo binário) |
-| api-2   | 0.425 | 165 MB | Detecção de fraude (IVF, protocolo binário) |
+| proxy   | 0.10 | 20 MB | Load balancer round-robin + /ready + /debug/vars + JSON→binário |
+| api-1   | 0.45 | 165 MB | Detecção de fraude (IVF, protocolo binário, /debug/vars) |
+| api-2   | 0.45 | 165 MB | Detecção de fraude (IVF, protocolo binário, /debug/vars) |
 | Total   | 1.0 | 350 MB | — |
 
 **Protocolo**: O proxy recebe JSON do cliente, faz o parsing, codifica em formato
@@ -38,6 +38,20 @@ Verificação de prontidão. O **proxy** consulta o `/ready` de cada backend (ap
 | Algum falha | **HTTP 503** `{"status":"degraded","backends":[...]}` |
 
 Isoladamente, cada API também expõe `GET /ready` na porta 8080, respondendo 200 assim que o índice IVF pré-construído é carregado (menos de 1 segundo).
+
+### `GET /debug/vars` (proxy e APIs)
+
+Endpoint de diagnóstico que expõe contadores internos em JSON. Permite rastrear
+exatamente onde as requisições se perdem no pipeline, sem logar em disco.
+
+**Proxy** (`GET /debug/vars` na porta 9999):
+- `requests_received`, `requests_forwarded`, `responses_received`
+- `backend_errors`, `api_errors`, `decode_errors`
+- `semaphore_503s`, `parse_errors`, `encode_errors`, `read_errors`
+
+**API** (`GET /debug/vars` na porta 8080):
+- `requests_received`, `responses_sent`
+- `decode_errors`, `read_errors`, `search_errors`, `semaphore_503s`
 
 ### `POST /fraud-score`
 
@@ -86,73 +100,54 @@ README.md              # Este arquivo
 
 ## Resultados do Teste Oficial (Evolução)
 
-> Última submissão: v24 (commit `c3edb96`) · Score final: **−6000** (pior possível)
+> Última submissão: v27 (commit `ddb5508`) · Docker Hub: `paulohrpinheiro/rinha-proxy:v27` + `rinha-api:v27`
 
-### Resultados reais (v24)
+### Benchmark local v27
 
-| Componente | Valor | Corte |
-|:-----------|:-----:|:-----:|
-| `score_p99` | **−3000** | ✅ p99 = 2001.85ms > 2000ms |
-| `score_det` | **−3000** | ✅ failure_rate = 99.28% > 15% |
-| **Final** | **−6000** | ⛔ Piso absoluto |
+| Carga | Concorrência | Req/s | p99 | Falhas |
+|:------|:-----------:|:-----:|:---:|:------:|
+| 2.000 | 50 | 570–640 | 203–298ms | **0** |
+| 10.000 | 100 | 560–613 | 398–420ms | **0** |
 
-### Evolução completa
+Zero erros em todas as 17 categorias de contadores. Round-robin perfeitamente balanceado (50/50).
 
-| Versão | Abordagem | Erros | OK | p99 | Score |
-|:------|:----------|:-----:|:--:|:---:|:-----:|
+### Evolução completa (oficial + local)
+
+| Versão | Mudança chave | Erros HTTP | OK | p99 | Score |
+|:------|:-------------|:----------:|:---:|:---:|:-----:|
 | v10 | TCP, httputil, sem timeouts | 13.858 | 0 | 2002ms | −6000 |
 | v16 | codec binário | 52.601 | 1.370 | 1042ms | −3018 |
-| v20 | proxy custom, semáforo 16 (503) | 50.368 | 3.691 | **501ms** | **−2700** |
+| v17 | Unix sockets | 53.370 | 599 | **1066ms** | −3028 |
+| v20 | proxy custom, semáforo 16 (503) | 50.368 | 3.691 | 501ms | −2700 |
 | v21 | semáforo removido | 49.706 | 326 | 2002ms | −6000 |
-| v22 | semáforo bloqueante 128 | 42.949 | 294 | 2002ms | −6000 |
-| v24 | + DecodeBytes fix | 44.800 | 329 | 2002ms | −6000 |
-| v25 | não-bloqueante 1024 + respostas pré-aloc + warmup | ~0* | ~54k* | ~10-50ms* | >+5000* |
-| v26 | v25 + K-means corrigido + nprobe=3 | 0** | 5000** | 97ms** | — |
+| v24 | DecodeBytes fix | 44.800 | 329 | 2002ms | −6000 |
+| **v26** | **K-means corrigido + nprobe=3** | **5.400** | **27.100** | **2002ms** | **−6000** |
+| **v27** | **diag + CPU 0.10/0.45 + timeouts 500ms + semaf 256 + nprobe=2** | **—** | **—** | **—** | **aguardando** |
 
-*Aguardando submissao v25. **Benchmark local v26 (commit c751a1e): 5000 reqs, concurrency 20, zero falhas**
+### v26 → v27: a virada
+
+O v26 provou que o sistema funciona (27.100 detecções corretas, precisão 97.9%), mas dois cortes rígidos travavam o score em −6000: p99 a 0.23ms do corte de 2000ms e 21k requisições "fantasmas" inflando o failure_rate para 18.09%.
+
+O v27 ataca ambos com 6 mudanças simultâneas:
+- **Contadores de diagnóstico** (ADR-46) para visibilidade total do pipeline
+- **CPU redistribuída** (ADR-47) para a config do v17 — única com p99 < 2000ms
+- **Timeouts relaxados** (ADR-48) de 100/200ms para 500ms, eliminando falsos timeouts
+- **Semáforo 256** (ADR-49) em vez de 1024, reduzindo pressão no scheduler
+- **nprobe=2** (ADR-50) em vez de 3, reduzindo latência de busca em 30%
+- **Warmup 64×** (ADR-51) em vez de 16×, aquecendo mais clusters
 
 ### Comparativo com o melhor concorrente
 
-| Métrica | Best (MXLange C) | v24 (último real) | v25 (esperado*) |
-|:--------|:----------------:|:----------------:|:----------------:|
-| p99 | **0.98ms** | 2001.85ms | **~10-50ms** |
-| Erros HTTP | **0** | 44.800 | **~0** |
-| TP | 24.037 | 152 | ~24.000 |
-| TN | 30.022 | 174 | ~30.000 |
-| FP | **0** | 2 | ~10-20 |
-| FN | **0** | 1 | ~10-20 |
-| Failure rate | **0%** | **99.28%** | **~1-2%** |
-| Score final | **+6000** | **−6000** | **>+5000** |
-
-*Aguardando submissão v25 (semáforo não-bloqueante 1024 + respostas pré-alocadas + warmup)
-
-### Causa raiz — três iterações
-
-**v20 (semáforo não-bloqueante 16 slots)** → 93% failure rate, 503s:
-- Das 54.100 reqs, ~3.600 processadas, 50.368 com 503
-
-**v21 (remoção total)** → 99% failure rate, p99=2002ms:
-- Das 54.100 reqs, apenas 326 processadas
-
-**v24 (DecodeBytes fix + semáforo bloqueante 128)** → 99% failure rate, p99=2002ms:
-- Apenas 329 reqs processadas — mesma classe de v21 sem semáforo
-- O DecodePayload não era o gargalo real
-
-**Causa raiz verdadeira: semáforo BLOQUEANTE cria cascade**
-- API semáforo (128) enche → proxy goroutines esperam API (I/O wait)
-- ProxySem slots ocupados por goroutines que esperam API → novas conexões k6 não entram
-- k6 timeout em 2001ms → 82% de erro HTTP
-- p99 em 2002ms porque erros dominam a distribuição de latência
-
-v20 processava 10× mais (3.691 reqs) porque o **semáforo não-bloqueante** com 503 rápido
-libera o proxySem imediatamente. O bloqueante travava tudo.
-
-**Correção v25**: três mudanças juntas:
-1. **Semáforo não-bloqueante 1024**: `select { case sem <- struct{}{}: }` com capacidade
-   1024. Em regime normal (~5 slots usados), nunca enche. Se encher, 503 rápido.
-2. **Respostas pré-alocadas**: 6 variações de JSON pré-computadas (`fraudResponses[6][]byte`),
-   zero serialização no hot path.
-3. **Warmup container**: 48 POSTs antes do teste via curl, aquecendo caches.
+| Métrica | Best (MXLange C) | v26 (oficial) | v27 (local) |
+|:--------|:----------------:|:------------:|:-----------:|
+| p99 | **0.98ms** | 2001.77ms | **398ms** |
+| Erros HTTP | **0** | 5.400 | **0** |
+| TP | 24.037 | 11.972 | — |
+| TN | 30.022 | 15.128 | — |
+| FP | **0** | 297 | — |
+| FN | **0** | 289 | — |
+| Failure rate | **0%** | 18.09% | **0%** |
+| Score final | **+6000** | **−6000** | **aguardando**
 
 ### Lições Aprendidas
 
@@ -167,6 +162,10 @@ libera o proxySem imediatamente. O bloqueante travava tudo.
 | 🐛 **Semáforo bloqueante foi o pior de todos** | v20 (não-bloqueante 16, 503) processou 3.691 reqs. v24 (bloqueante 128 + DecodeBytes) processou 329. O bloqueante é pior que não ter semáforo. A chave é capacidade folgada + não-bloqueante. |
 | 🎯 **Semáforo não-bloqueante 1024 + respostas pré-alocadas + warmup** | Combinação que resolve os problemas de v20-24: não-bloqueante com folga elimina cascade, resposta pronta evita serialização, warmup aquece caches. |
 | 🧹 **Revisar ADRs obsoletos** | ADRs que resolviam problemas de versões anteriores podem virar o próprio problema. Remova ou ajuste quando a stack mudar. |
+| 📈 **Benchmark local ≠ teste oficial** | v26 teve p99=97ms local e 2001ms oficial. A diferença está no ramp-up do k6 (180 req/s sustentado por 5min) vs rajadas curtas do ab. |
+| 🔬 **Diagnóstico é tão importante quanto otimização** | Sem contadores (ADR-46), as 21k requisições "fantasmas" do v26 eram invisíveis. Adicionar `/debug/vars` em proxy e APIs revelou exatamente onde cada requisição estava. |
+| 🎛️ **Timeouts muito curtos causam falsos timeouts** | Com GOMAXPROCS=1 e 180 req/s, uma goroutine pode esperar >100ms pelo scheduler. Timeout de 100ms dispara antes do processamento começar. |
+| ⚖️ **Capacidade do semáforo é uma curva em U** | 16 slots (v20): muitos 503. 128 bloqueante (v24): cascade. 1024 (v26): scheduler thrashing. 256 (v27): equilíbrio. |
 
 As decisões arquiteturais estão documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)**.
 
@@ -196,9 +195,10 @@ sem `json.Unmarshal` — zero alocações de parsing.
 Cada campo é normalizado para [0,1] seguindo as fórmulas em [REGRAS_DE_DETECCAO.md](./docs/REGRAS_DE_DETECCAO.md) e quantizado para int8 (0-127), reduzindo 4x o uso de memória.
 
 ### 4. Busca Vetorial (IVF Index)
-- Encontra os 3 centroides mais próximos (nprobe=3) entre 1.000 centroides
+- Encontra os 2 centroides mais próximos (nprobe=2) entre 1.000 centroides
 - Busca os 5 vizinhos mais próximos dentro desses clusters (até 5.000 vetores por cluster)
-- Distribuição balanceada: clusters de 914 a 6.109 vetores (K-means corrigido)
+- Distribuição balanceada: clusters de 914 a 6.109 vetores (K-means corrigido, ADR-45)
+- Latência de busca: ~90µs (nprobe=2) vs ~130µs (nprobe=3)
 - Usa distância Manhattan com loop unrolled
 
 ### 5. Decisão
@@ -255,7 +255,7 @@ Baixe do [repositório oficial da Rinha](https://github.com/zanfranceschi/rinha-
 |----------|:-----:|:---------:|
 | ManhattanDistance (14 dims) | ~14 ns | 0 B/op |
 | Normalize (payload -> vetor) | ~100 ns | 0 B/op |
-| IVF Search (Normalize + Search, 3 clusters) | ~130 µs | 0 B/op |
+| IVF Search (Normalize + Search, 2 clusters) | ~90 µs | 0 B/op |
 
 ---
 
@@ -368,6 +368,13 @@ Documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)** — arquivo de contex
 | 43 | DecodePayload fix (ReadAll+DecodeBytes) | Elimina blocking read de 200ms |
 | 44 | nprobe=3 + maxScanPerCluster=5000 | Latência máxima ~350µs mesmo com índice degenerado |
 | 45 | K-means corrigido (bug Quantize + 25 iter) | Clusters balanceados: 914-6109 (antes: 0-1.27M) |
+| 46 | Contadores de diagnóstico (proxy + API) | Visibilidade total do pipeline via `/debug/vars` |
+| 47 | CPU proxy 0.10, APIs 0.45 | Retorno à config do v17 — único p99 < 2000ms |
+| 48 | Timeouts HTTP 500ms | Elimina falsos timeouts por starvation de scheduler |
+| 49 | Semáforo 256 (não-bloqueante) | Equilíbrio entre folga e pressão de scheduler |
+| 50 | nprobe=2 | Redução de 30% na latência de busca (130→90µs) |
+| 51 | Warmup expandido (64 searches) | Cobertura ampliada de clusters antes do tráfego real |
+| 52 | Otimização codec adiada | `bytes.Buffer` não expõe API para buffer reuse seguro |
 
 ---
 
