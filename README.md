@@ -175,6 +175,21 @@ por 5 minutos).
 | v24 | DecodeBytes fix | 44.800 | 329 | 2002ms | −6000 |
 | **v26** | **K-means corrigido + nprobe=3** | 5.400 | **27.686** | 2002ms | −6000 |
 | **v27** | **diag + CPU 0.10 + timeouts 500ms + semaf 256 + nprobe=2** | **10.006** | **8.955** | 2002ms | **−6000** |
+| **v28** | **reverte timeouts 200ms (1 diff)** | **12.321** | **3.173** | 2002ms | **−6000** |
+
+### Análise: CPU do proxy é o gargalo
+
+| Métrica | v26 (p=0.15) | v27 (p=0.10) | v28 (p=0.10) |
+|---------|:-----------:|:-----------:|:-----------:|
+| HTTP errors | 5.400 | 10.006 | 12.321 |
+| Processados | 33.086 | 18.961 | 15.494 |
+| Fantasmas | 21.014 | 35.139 | 38.606 |
+| Failure rate | 18.09% | 53.88% | 79.99% |
+
+A cada redução de CPU no proxy, o throughput cai ~40%. O proxy com 0.10 CPU
+não consegue sustentar parsing JSON + encode binário + forward a 180 req/s.
+A evidência dos 3 resultados oficiais aponta que **o proxy é o gargalo
+principal**, e a CPU alocada a ele é o fator determinante do throughput.
 
 ### Lições Aprendidas
 

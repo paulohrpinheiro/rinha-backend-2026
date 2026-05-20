@@ -1836,6 +1836,7 @@ por vez, começando pela mais provável (timeouts).
 
 **Arquivos alterados**: nenhum (ADR de lição aprendida).
 
+
 **Consequências**:
 - Próximas submissões devem ter exatamente 1 diff em relação à anterior.
 - O benchmark local continua útil como smoke test (verifica que o sistema
@@ -1851,3 +1852,67 @@ por vez, começando pela mais provável (timeouts).
 - [BUSCA_VETORIAL.md](./BUSCA_VETORIAL.md) — introdução à busca vetorial
 - [API.md](./API.md) — contrato da API
 - [AVALIACAO.md](./AVALIACAO.md) — fórmula de pontuação (timeout de 2001ms, corte de 15%)
+
+---
+
+## ADR-54: Reversão de timeouts para 200ms (v28)
+
+**Contexto**: O ADR-48 aumentou timeouts de 100-200ms para 500ms. A análise da
+regressão v27 elencou os timeouts longos como hipótese principal. O v28 isolou
+essa variável: reverteu timeouts para 200ms mantendo as demais mudanças do v27.
+
+**Decisão**: Reverter `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` de
+500ms para 200ms no proxy e na API. Proxy client timeout de 800ms para 500ms.
+
+**Resultado oficial (v28, commit 760d755)**:
+
+| Métrica | v27 (500ms) | v28 (200ms) | Delta |
+|---------|:----------:|:----------:|:-----:|
+| HTTP errors | 10.006 | 12.321 | +23% |
+| Processados | 18.961 | 15.494 | −18% |
+| Failure rate | 53.88% | 79.99% | +48% |
+| Score | −6000 | −6000 | — |
+
+A reversão dos timeouts **piorou** o resultado — refutando a hipótese de que
+timeouts longos eram a causa principal. O throughput caiu mais 18%, sugerindo
+que a variável crítica é outra.
+
+**Consequências**:
+- Timeouts NÃO são o gargalo principal. A causa raiz está na CPU do proxy.
+- O método de 1 diff por submissão funcionou: isolou a variável e produziu
+  evidência conclusiva (negativa).
+
+---
+
+## ADR-55: Proxy CPU é o gargalo principal — evidência de 3 resultados
+
+**Contexto**: Três submissões consecutivas (v26, v27, v28) formam um experimento
+natural controlando a CPU do proxy:
+
+| Versão | Proxy CPU | API CPU | Processados | Failure rate |
+|:------|:---------:|:-------:|:----------:|:------------:|
+| v26 | **0.15** | 0.425 | 33.086 | 18.09% |
+| v27 | **0.10** | 0.45 | 18.961 | 53.88% |
+| v28 | **0.10** | 0.45 | 15.494 | 79.99% |
+
+A cada redução de 0.05 CPU no proxy, o throughput cai ~40%. O proxy é
+responsável por parsing JSON + encode binário + forward HTTP via Unix socket
+— operações CPU-bound que consomem ~337μs por requisição. Com 0.10 CPU
+(100ms/s), o throughput máximo teórico é ~296 req/s. Na prática, com
+overhead de scheduler e GC, o proxy não sustenta 180 req/s.
+
+**Decisão**: Para v29, restaurar a configuração original do v26:
+proxy=0.15 CPU, APIs=0.425 CPU. Este é o 1 diff planejado: apenas
+`docker-compose.yml` e `docker-compose.submission.yml`.
+
+**Hipótese**: com proxy 0.15 CPU, o throughput deve retornar ao patamar
+do v26 (~33k processados) ou superior (já que as outras melhorias do v27
+— contadores, nprobe=2, warmup — permanecem).
+
+**Arquivos alterados**: `docker-compose.yml`, `docker-compose.submission.yml`.
+
+**Consequências**:
+- Se o v29 mostrar throughput ≥ 33k, a hipótese está confirmada.
+- Se o v29 ainda falhar, há outro fator não identificado.
+- Esta é a última hipótese de tuning — se falhar, partir para mudanças
+  estruturais (fasthttp, fd-passing) conforme MELHORIAS.md.
