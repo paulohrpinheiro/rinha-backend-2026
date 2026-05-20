@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"time"
 
 	"rinha-backend/internal/handler"
@@ -99,6 +100,12 @@ func main() {
 
 	h := handler.New(idx, norm)
 	h.Warmup()
+
+	// Free memory returned to OS after index load + warmup.
+	// The IVF index (~47MB) is the only large allocation; the rest
+	// (normalization.json, mcc_risk.json < 1MB) is negligible.
+	// With GOMEMLIMIT=60MiB, returning pages to OS reduces RSS pressure.
+	debug.FreeOSMemory()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ready", h.Ready)

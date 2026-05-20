@@ -34,7 +34,7 @@ services:
       - RESOURCES_DIR=/resources
       - UNIX_SOCKET_DIR=/run/sock
       - GOGC=off
-      - GOMEMLIMIT=150MiB
+      - GOMEMLIMIT=60MiB
     networks:
       - rinha-net
     volumes:
@@ -53,7 +53,7 @@ services:
       - RESOURCES_DIR=/resources
       - UNIX_SOCKET_DIR=/run/sock
       - GOGC=off
-      - GOMEMLIMIT=150MiB
+      - GOMEMLIMIT=60MiB
     networks:
       - rinha-net
     volumes:

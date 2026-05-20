@@ -2019,3 +2019,24 @@ do score negativo requer mudanças estruturais, conforme MELHORIAS.md:
 - v30 é a configuração canônica de parâmetros.
 - Próximas versões devem manter os parâmetros do v30 e focar em mudanças
   estruturais, uma de cada vez.
+
+---
+
+## ADR-60: GOMEMLIMIT=60MiB + FreeOSMemory (v33)
+
+**Contexto**: O MELHORIAS.md §8 aponta que a referência Go usa GOMEMLIMIT=60MiB
+(vs nossos 150MiB) e chama debug.FreeOSMemory() após startup. Com o índice
+IVF ocupando ~47MB, o Go runtime mantém páginas mapeadas mesmo após a fase
+de build. Reduzir GOMEMLIMIT força o GC a ser mais agressivo, e FreeOSMemory
+devolve páginas ao kernel, reduzindo RSS pressure.
+
+**Decisão**: Reduzir GOMEMLIMIT de 150MiB para 60MiB no docker-compose.yml
+de ambos os serviços API. Adicionar `debug.FreeOSMemory()` após warmup em
+cmd/api/main.go. GOGC=off mantido.
+
+**Arquivos alterados**: `docker-compose.yml`, `cmd/api/main.go`.
+
+**Consequências**:
+- GC mais frequente com limite de 60MiB — mas com GOGC=off e alocações
+  mínimas no hot path (zero no codec, zero nas respostas), o impacto é baixo.
+- RSS menor pode ajudar o container a ficar dentro do limite de 165MB.
