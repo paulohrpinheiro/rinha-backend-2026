@@ -285,6 +285,27 @@ Baixe do [repositório oficial da Rinha](https://github.com/zanfranceschi/rinha-
 | Normalize (payload -> vetor) | ~100 ns | 0 B/op |
 | IVF Search (Normalize + Search, 2 clusters) | ~90 µs | 0 B/op |
 
+### Benchmark de carga realista
+
+Script `scripts/bench_realista.go` simula o padrão do k6 oficial:
+180 req/s sustentado por 5 minutos, com ramp-up e 4 payloads variados.
+
+```bash
+# Ambiente local (com constraints Docker)
+docker compose up -d --build
+go run scripts/bench_realista.go -duration=5m -ramp-up=30s
+
+# Teste rápido (1 minuto)
+go run scripts/bench_realista.go -duration=1m -ramp-up=5s
+```
+
+Coleta p50/p95/p99, erros HTTP, erros de conexão e consulta `/debug/vars`.
+Julgamento automático: 🟢 passou / 🔴 falhou (p99 < 2000ms, taxa > 85%).
+
+⚠️ O benchmark local é um **smoke test** — não prevê o resultado oficial.
+O v27 passou com 51k reqs, p99=2.7ms, zero erros, mas teve score −6000
+no teste oficial (a diferença está no ambiente de rede e perfil de ramp-up do k6).
+
 ---
 
 ## Docker
