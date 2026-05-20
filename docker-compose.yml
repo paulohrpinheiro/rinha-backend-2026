@@ -26,7 +26,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.15"
+          cpus: "0.10"
           memory: "20MB"
 
   api-1:
@@ -48,7 +48,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.425"
+          cpus: "0.45"
           memory: "165MB"
 
   api-2:
@@ -70,7 +70,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.425"
+          cpus: "0.45"
           memory: "165MB"
 
   # warmup removed: warmup now runs inline in the API binary after loading the IVF index

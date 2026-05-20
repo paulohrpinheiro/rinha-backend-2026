@@ -1616,6 +1616,184 @@ centroids[c][d] = vector.Quantize(avg / 127.0)  // normaliza para [0,1] antes de
 
 ---
 
+---
+
+## ADR-46: Contadores de diagnóstico (proxy + API)
+
+**Contexto**: O v26 (pós-correção do K-means) processou 27.100 requisições com sucesso,
+teve 5.400 HTTP errors e ~21.014 requisições "desaparecidas" — nem erro HTTP, nem
+detecção registrada. Sem instrumentação interna, a causa dessas perdas é invisível.
+
+**Decisão**: Adicionar contadores atômicos em ambos os serviços, expostos via
+`GET /debug/vars`:
+
+**Proxy** (`ProxyCounters`):
+- `requests_received` — total aceito pelo proxy
+- `requests_forwarded` — enviadas com sucesso para API
+- `responses_received` — respostas 200 OK da API
+- `backend_errors` — `client.Do` retornou erro (timeout/conexão)
+- `api_errors` — API respondeu com status != 200
+- `decode_errors` — `codec.DecodeResponse` falhou
+- `semaphore_503s` — semáforo cheio → 503
+- `parse_errors` — JSON inválido no body
+- `encode_errors` — `codec.EncodePayload` falhou
+- `read_errors` — `io.Copy` do body falhou
+- `bad_gateway_errors` — criação da request proxy→API falhou
+
+**API** (`APICounters`):
+- `requests_received` — total recebido no `/fraud-score`
+- `responses_sent` — 200 OK com resposta binária
+- `decode_errors` — `codec.DecodeBytes` falhou
+- `read_errors` — `io.ReadAll` do body falhou
+- `search_errors` — `h.index.Search` retornou erro (fallback silencioso)
+- `semaphore_503s` — semáforo cheio → 503
+
+Os endpoints `/debug/vars` no proxy e na API retornam JSON com os contadores,
+permitindo diagnóstico sem logar no container (evitando syscalls no hot path).
+
+**Arquivos alterados**: `cmd/proxy/main.go`, `internal/handler/fraud.go`,
+`cmd/api/main.go`.
+
+**Consequências**:
+- Visibilidade total do pipeline: diferença entre `requests_received` (proxy)
+  e `requests_received` (API) revela perdas no proxy; diferença entre
+  `requests_received` e `responses_sent` na API revela perdas na API.
+- Zero impacto no hot path: `atomic.Add(1)` é ~5ns.
+
+---
+
+## ADR-47: Redistribuição de CPU — proxy 0.10, APIs 0.45
+
+**Contexto**: O v26 usava proxy=0.15, APIs=0.425. O v17 (proxy=0.10, APIs=0.45)
+foi o único resultado com p99 < 2000ms (1066ms). Com o K-means corrigido (ADR-45),
+a busca vetorial é uniforme (~130μs/consulta), mas ainda é CPU-bound. Cada 0.025
+de CPU extra na API representa ~25ms/s adicional de processamento.
+
+**Decisão**: Retornar à distribuição do v17:
+
+| Serviço | Antes (v26) | Depois (v27) |
+|---------|:-----------:|:------------:|
+| proxy   | 0.15        | **0.10**     |
+| api-1   | 0.425       | **0.45**     |
+| api-2   | 0.425       | **0.45**     |
+| Total   | 1.0         | 1.0          |
+
+**Arquivos alterados**: `docker-compose.yml`, `docker-compose.submission.yml`.
+
+**Consequências**:
+- APIs com 5.9% mais CPU — pode ser a diferença entre p99 2001ms e <2000ms.
+- Proxy com 0.10 ainda é suficiente (v17 provou com 1066ms p99).
+- Orçamento total inalterado (1.0 CPU).
+
+---
+
+## ADR-48: Timeouts HTTP menos agressivos (100/200ms → 500/500ms)
+
+**Contexto**: O v26 usava timeouts extremamente curtos: ReadHeaderTimeout=100ms,
+ReadTimeout=200ms, WriteTimeout=200ms. Com GOMAXPROCS=1 e 180 req/s, uma goroutine
+pode esperar >100ms pelo scheduler antes de processar o header — disparando timeout
+falso mesmo que a requisição fosse completar.
+
+O v17 usava timeouts de 1s e obteve p99=1066ms. Timeouts curtos causam falsos
+timeouts que inflam o failure_rate e o p99.
+
+**Decisão**: Aumentar timeouts para valores ainda seguros mas com folga:
+
+| Timeout | v26 | v27 |
+|---------|:---:|:---:|
+| ReadHeaderTimeout (proxy+API) | 100ms | **500ms** |
+| ReadTimeout (proxy+API) | 200ms | **500ms** |
+| WriteTimeout (proxy+API) | 200ms | **500ms** |
+| Proxy client timeout | 500ms | **800ms** |
+
+**Arquivos alterados**: `cmd/api/main.go`, `cmd/proxy/main.go`.
+
+**Consequências**:
+- Goroutines com starvation de scheduler não disparam timeout falso.
+- 500ms é 500.000× maior que o tempo real de processamento (<1ms).
+- Conexões realmente lentas ainda são cortadas em 500ms.
+
+---
+
+## ADR-49: Redução do semáforo para 256 slots (proxy + API)
+
+**Contexto**: O v26 usava semáforo não-bloqueante com 1024 slots. Com GOMAXPROCS=1,
+1024 goroutines "ativas" significam 1023 parkadas, pressionando o scheduler e o GC.
+O v17 usava 128 slots bloqueantes e obteve p99=1066ms.
+
+Na prática, com 180 req/s e ~130μs por busca, apenas ~25 slots estão ocupados em
+regime. 256 slots dão folga de 10× e mantêm o scheduler sob controle.
+
+**Decisão**: Reduzir `proxySem` e `semaphore` de 1024 para 256, mantendo o
+comportamento não-bloqueante (`select/default`).
+
+**Arquivos alterados**: `cmd/proxy/main.go`, `internal/handler/fraud.go`.
+
+**Consequências**:
+- Máximo de 256 goroutines runáveis por serviço (vs 1024).
+- Menos GC pressure por stack de goroutine.
+- 503 só ocorre sob rajada extrema (>10× a carga normal).
+
+---
+
+## ADR-50: Redução de nprobe de 3 para 2 clusters
+
+**Contexto**: O ADR-44 introduziu nprobe=3 com maxScanPerCluster=5000, varrendo
+~15.000 vetores por consulta (~130μs). Com o índice balanceado (ADR-45), todos
+os 1000 clusters têm tamanho similar (914–6109 vetores). A probabilidade de um
+vizinho próximo estar no 3º cluster é baixa com distribuição uniforme.
+
+**Decisão**: Reduzir nprobe de 3 para 2. A busca agora varre ~10.000 vetores
+(2 clusters × ~5000), latência estimada de ~90μs (redução de 30%).
+
+**Arquivos alterados**: `internal/index/index.go`.
+
+**Consequências**:
+- Ganho de ~40μs por consulta — margem que pode salvar o p99.
+- Perda marginal de recall estimada em <0.5% — threshold 0.6 absorve.
+- Se o teste oficial mostrar degradação de FP/FN, reverter para nprobe=3.
+
+---
+
+## ADR-51: Expansão do warmup para 64 searches
+
+**Contexto**: O warmup anterior (ADR-44) fazia 16 searches (4 payloads × 4 rounds).
+Com 1000 clusters, 16 searches aquecem no máximo 16 clusters — <2% do índice.
+O primeiro tráfego real encontra clusters frios, com page faults e cache misses
+que aumentam a latência das primeiras requisições.
+
+**Decisão**: Expandir o warmup de 4 rounds para 16 rounds (64 searches totais).
+Com 4 payloads diversos (card_present/online, com/sem last_transaction), a
+cobertura de clusters aumenta proporcionalmente.
+
+**Arquivos alterados**: `internal/handler/fraud.go`.
+
+**Consequências**:
+- Mais clusters com dados em L1/L2 antes do primeiro tráfego real.
+- Page faults absorvidos durante startup, não durante o teste.
+- Tempo de warmup: ~2ms adicional (64 × 130μs ≈ 8ms com I/O).
+
+---
+
+## ADR-52: Otimização de alocação no codec (adiada)
+
+**Contexto**: `EncodePayload` aloca `buf := make([]byte, totalSize)` (~130 bytes)
+a cada encode. Com 180 req/s, são ~23KB/s de alocação. Tentou-se reutilizar o
+buffer do `encodeBufPool` via `bytes.Buffer.Grow` + acesso direto ao slice
+interno, mas a API do `bytes.Buffer` não permite avançar o `Len` sem escrever
+dados, e a implementação alternativa (`bw.Write(make([]byte, totalSize))`)
+alocava da mesma forma.
+
+**Decisão**: Manter `make([]byte, totalSize)` simples e correto. O ganho potencial
+(~1-2μs) não justifica a fragilidade de uma otimização que depende de comportamento
+interno do `bytes.Buffer`.
+
+**Consequências**:
+- Código mantido simples e portável.
+- Alocação de ~130 bytes/request é trivial para o GC do Go (23KB/s com 180 req/s).
+
+---
+
 ## Referências
 
 - [REGRAS_DE_DETECCAO.md](./REGRAS_DE_DETECCAO.md) — fórmulas das 14 dimensões

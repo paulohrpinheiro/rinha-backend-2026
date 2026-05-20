@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"rinha-backend/internal/codec"
@@ -12,18 +14,23 @@ import (
 	"rinha-backend/internal/vector"
 )
 
-// semaphore limits concurrent fraud-score requests (non-blocking, large
-// capacity). 1024 slots rarely fills — at 180 req/s and ~45μs CPU each on
-// 0.425 cores, only ~10-20 slots are in use at steady state.
-//
-// Non-blocking (select/default) returns fast 503 when full instead of
-// blocking. The blocking semaphore (128) was worse than no semaphore:
-// it caused all 128 slots to fill, API goroutines parked, proxy waited,
-// proxy slots filled, k6 connections hung — 99% failure rate.
-//
-// With 1024 slots and non-blocking behavior, 503s are extremely rare
-// and, when they happen, fast (<1μs) — preventing cascade.
-var semaphore = make(chan struct{}, 1024)
+// semaphore limits concurrent fraud-score requests (non-blocking, 256 slots).
+// 256 slots provides headroom for bursts while keeping scheduler pressure low
+// with GOMAXPROCS=1. At steady state (~25 concurrent, 130μs each), max queue
+// depth is ~33ms.
+var semaphore = make(chan struct{}, 256)
+
+// APICounters tracks internal metrics for diagnosing where requests are lost.
+type APICounters struct {
+	RequestsReceived atomic.Int64 // total POST /fraud-score received
+	ResponsesSent    atomic.Int64 // 200 OK with binary response
+	DecodeErrors     atomic.Int64 // codec.DecodeBytes failed
+	ReadErrors       atomic.Int64 // io.ReadAll body read failed
+	SearchErrors     atomic.Int64 // h.index.Search returned error (silent fallback)
+	Semaphore503s    atomic.Int64 // semaphore full → 503
+}
+
+var apiCounters APICounters
 
 // payloadPool reuses codec.Payload structs and their internal buffers
 // (rawBuf, KnownMerchants slice) across requests, avoiding allocations.
@@ -54,16 +61,37 @@ func (h *FraudHandler) Ready(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"ok"}`))
 }
 
+// DebugVars handles GET /debug/vars — exposes internal counters for diagnostics.
+func (h *FraudHandler) DebugVars(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"api":{`+
+		`"requests_received":%d,`+
+		`"responses_sent":%d,`+
+		`"decode_errors":%d,`+
+		`"read_errors":%d,`+
+		`"search_errors":%d,`+
+		`"semaphore_503s":%d`+
+		`}}`+"\n",
+		apiCounters.RequestsReceived.Load(),
+		apiCounters.ResponsesSent.Load(),
+		apiCounters.DecodeErrors.Load(),
+		apiCounters.ReadErrors.Load(),
+		apiCounters.SearchErrors.Load(),
+		apiCounters.Semaphore503s.Load(),
+	)
+}
+
 // FraudScore handles POST /fraud-score — processes a transaction and
 // returns the fraud decision using binary codec (zero JSON allocations).
 func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
-	// Acquire non-blocking semaphore slot. 1024 capacity under normal load
-	// (180 req/s) means ~10-20 concurrent — never fills. If full (extreme
-	// burst), fast 503 prevents cascade (blocking caused 99% failure rate).
+	apiCounters.RequestsReceived.Add(1)
+
+	// Acquire non-blocking semaphore slot.
 	select {
 	case semaphore <- struct{}{}:
 		defer func() { <-semaphore }()
 	default:
+		apiCounters.Semaphore503s.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte(`{"error":"too many requests"}`))
@@ -71,20 +99,19 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Decode binary payload directly via DecodeBytes (no io.Reader blocking).
-	// Read r.Body once — http.Server's body reader respects Content-Length
-	// and returns exactly the proxy's binary payload (~130 bytes), no extra
-	// blocking reads. Then parse from the byte slice.
 	payload := payloadPool.Get().(*codec.Payload)
 	defer payloadPool.Put(payload)
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
+		apiCounters.ReadErrors.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"cannot read body"}`))
 		return
 	}
 	if err := codec.DecodeBytes(bodyBytes, payload); err != nil {
+		apiCounters.DecodeErrors.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"invalid payload"}`))
@@ -97,6 +124,7 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 	// 4. Search for 5 nearest neighbors
 	fraudCount, err := h.index.Search(&queryVec)
 	if err != nil {
+		apiCounters.SearchErrors.Add(1)
 		// Silent fallback
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -109,32 +137,28 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 	approved := fraudScore < 0.6
 
 	// 6. Write binary response (9 bytes: approved bool + fraud_score float64)
-	// The proxy will decode this and serialize to JSON for the client.
-	// Use io.MultiWriter? No, we just write directly.
-	// We need a header so the proxy knows this is a binary response.
-	// Content-Type: application/octet-stream signals binary body.
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
 
-	// Write directly to the response writer — no buffering needed
 	if err := codec.EncodeResponse(w, codec.Response{
 		Approved:   approved,
 		FraudScore: fraudScore,
 	}); err != nil {
-		// If write fails, connection is broken anyway — nothing to do
 		return
 	}
+
+	apiCounters.ResponsesSent.Add(1)
 }
 
-// Warmup runs a few representative searches right after loading the IVF
-// index, before the HTTP server starts accepting requests. This:
+// Warmup runs representative searches after loading the IVF index, before
+// the HTTP server starts accepting requests. This:
 //   - Warms CPU caches (L1/L2/L3) for the vector search hot path
-//   - Touches cluster data across different centroid regions
+//   - Touches cluster data across diverse centroid regions
 //   - Causes Go runtime to compile and inline the hot functions
 //   - Absorbs first-access page faults and memory allocation costs
 //
-// 16 searches across 4 payload varieties cover enough diversity to warm
-// multiple clusters and execution paths.
+// 64 searches across 4 payload varieties × 16 rounds cover enough diversity
+// to warm most of the 1000 clusters' data paths.
 func (h *FraudHandler) Warmup() {
 	log.Print("Warming up IVF index...")
 	start := time.Now()
@@ -170,7 +194,7 @@ func (h *FraudHandler) Warmup() {
 			HasLastTransaction: true, LastTimestamp: time.Now().Add(-8 * time.Hour), LastKmFromCurrent: 793.8},
 	}
 
-	for round := 0; round < 4; round++ {
+	for round := 0; round < 16; round++ {
 		for i := range payloads {
 			q := vector.Normalize(&payloads[i], h.norm)
 			h.index.Search(&q)

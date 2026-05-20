@@ -11,12 +11,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"math"
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +37,54 @@ var fraudResponses = [6][]byte{
 	[]byte(`{"approved":false,"fraud_score":0.6}`),
 	[]byte(`{"approved":false,"fraud_score":0.8}`),
 	[]byte(`{"approved":false,"fraud_score":1.0}`),
+}
+
+// ProxyCounters tracks internal metrics for diagnosing where requests are lost.
+// All counters use atomic.Int64 for lock-free increment under concurrency.
+type ProxyCounters struct {
+	RequestsReceived  atomic.Int64 // total accepted by proxy
+	RequestsForwarded atomic.Int64 // successfully sent to API
+	ResponsesReceived atomic.Int64 // 200 OK responses from API
+	BackendErrors     atomic.Int64 // client.Do returned error (timeout/connection)
+	APIErrors         atomic.Int64 // API responded with non-200 status
+	DecodeErrors      atomic.Int64 // codec.DecodeResponse failed
+	Semaphore503s     atomic.Int64 // semaphore full → 503
+	ParseErrors       atomic.Int64 // invalid JSON in request body
+	EncodeErrors      atomic.Int64 // codec.EncodePayload failed
+	ReadErrors        atomic.Int64 // io.Copy body read failed
+	BadGatewayErrors  atomic.Int64 // proxy→API request creation failed
+}
+
+var proxyCounters ProxyCounters
+
+// debugVarsHandler exposes internal counters as JSON for diagnostics.
+func debugVarsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"proxy":{`+
+		`"requests_received":%d,`+
+		`"requests_forwarded":%d,`+
+		`"responses_received":%d,`+
+		`"backend_errors":%d,`+
+		`"api_errors":%d,`+
+		`"decode_errors":%d,`+
+		`"semaphore_503s":%d,`+
+		`"parse_errors":%d,`+
+		`"encode_errors":%d,`+
+		`"read_errors":%d,`+
+		`"bad_gateway_errors":%d`+
+		`}}`+"\n",
+		proxyCounters.RequestsReceived.Load(),
+		proxyCounters.RequestsForwarded.Load(),
+		proxyCounters.ResponsesReceived.Load(),
+		proxyCounters.BackendErrors.Load(),
+		proxyCounters.APIErrors.Load(),
+		proxyCounters.DecodeErrors.Load(),
+		proxyCounters.Semaphore503s.Load(),
+		proxyCounters.ParseErrors.Load(),
+		proxyCounters.EncodeErrors.Load(),
+		proxyCounters.ReadErrors.Load(),
+		proxyCounters.BadGatewayErrors.Load(),
+	)
 }
 
 // unixSocketDialer returns a dialer that connects to /run/sock/<hostname>.sock.
@@ -74,12 +124,11 @@ var encodeBufPool = sync.Pool{
 	New: func() any { return new(bytes.Buffer) },
 }
 
-// proxySem limits concurrent proxy requests (non-blocking, large capacity).
-// 1024 slots ensures it rarely fills under normal load (180 req/s uses ~5
-// slots). If full under extreme burst, returns fast 503 instead of cascading
-// into timeouts — the blocking semaphore (128) caused proxy goroutines to
-// park waiting for API responses, filling proxy slots and cascading failures.
-var proxySem = make(chan struct{}, 1024)
+// proxySem limits concurrent proxy requests (non-blocking, 256 slots).
+// 256 slots provides enough headroom for bursts while keeping scheduler
+// pressure low with GOMAXPROCS=1. At steady state (~25 concurrent),
+// max queue depth is ~33ms (256 × 130μs).
+var proxySem = make(chan struct{}, 256)
 
 // RoundRobinProxy handles POST /fraud-score: parses JSON, encodes to binary,
 // forwards to an API, decodes binary response, returns JSON.
@@ -90,15 +139,16 @@ type RoundRobinProxy struct {
 }
 
 func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Acquire non-blocking semaphore slot. With 1024 capacity, almost never
-	// full under normal load (~5 slots at 180 req/s). When full (extreme
-	// burst), fast 503 prevents the cascade: blocking semaphore caused proxy
-	// goroutines to park waiting for API responses, filling all 128 proxy
-	// slots, which blocked new k6 connections → k6 timeouts at 2001ms.
+	proxyCounters.RequestsReceived.Add(1)
+
+	// Acquire non-blocking semaphore slot. 256 capacity under normal load
+	// (180 req/s) means ~20-30 concurrent — plenty of headroom. When full
+	// (extreme burst), fast 503 prevents cascade.
 	select {
 	case proxySem <- struct{}{}:
 		defer func() { <-proxySem }()
 	default:
+		proxyCounters.Semaphore503s.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write(fraudResponses[0])
@@ -113,6 +163,7 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	bodyBuf := bodyBufPool.Get().(*bytes.Buffer)
 	bodyBuf.Reset()
 	if _, err := io.Copy(bodyBuf, r.Body); err != nil {
+		proxyCounters.ReadErrors.Add(1)
 		bodyBufPool.Put(bodyBuf)
 		http.Error(w, "cannot read body", http.StatusInternalServerError)
 		return
@@ -123,6 +174,7 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	jsonPayload := jsonPayloadPool.Get().(*model.TransactionPayload)
 	defer jsonPayloadPool.Put(jsonPayload)
 	if err := json.Unmarshal(bodyBytes, jsonPayload); err != nil {
+		proxyCounters.ParseErrors.Add(1)
 		bodyBufPool.Put(bodyBuf)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -157,6 +209,7 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	binBuf := encodeBufPool.Get().(*bytes.Buffer)
 	binBuf.Reset()
 	if err := codec.EncodePayload(binBuf, cp); err != nil {
+		proxyCounters.EncodeErrors.Add(1)
 		encodeBufPool.Put(binBuf)
 		http.Error(w, "encode error", http.StatusInternalServerError)
 		return
@@ -166,6 +219,7 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	targetURL := backend + r.URL.Path
 	breq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, binBuf)
 	if err != nil {
+		proxyCounters.BadGatewayErrors.Add(1)
 		encodeBufPool.Put(binBuf)
 		http.Error(w, "cannot create request", http.StatusInternalServerError)
 		return
@@ -174,9 +228,11 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	breq.ContentLength = int64(binBuf.Len())
 
 	// 8. Send to backend via http.Client (Unix socket transport)
+	proxyCounters.RequestsForwarded.Add(1)
 	resp, err := p.client.Do(breq)
 	encodeBufPool.Put(binBuf) // buffer consumed by http.NewRequestWithContext
 	if err != nil {
+		proxyCounters.BackendErrors.Add(1)
 		http.Error(w, "backend error", http.StatusBadGateway)
 		return
 	}
@@ -184,6 +240,7 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 9. Check for API-level errors
 	if resp.StatusCode != http.StatusOK {
+		proxyCounters.APIErrors.Add(1)
 		// Read error body and forward as JSON
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		w.Header().Set("Content-Type", "application/json")
@@ -195,9 +252,12 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 10. Decode binary response (9 bytes)
 	binResp, err := codec.DecodeResponse(resp.Body)
 	if err != nil {
+		proxyCounters.DecodeErrors.Add(1)
 		http.Error(w, "invalid response", http.StatusBadGateway)
 		return
 	}
+
+	proxyCounters.ResponsesReceived.Add(1)
 
 	// 11. Write pre-allocated JSON response (zero serialization)
 	fraudCount := int(math.Round(binResp.FraudScore * 5))
@@ -310,7 +370,7 @@ func main() {
 		backends: rawBackends,
 		client: &http.Client{
 			Transport: proxyTransport,
-			Timeout:   500 * time.Millisecond,
+			Timeout:   800 * time.Millisecond,
 		},
 	}
 
@@ -326,19 +386,21 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /ready", &ReadyHandler{backends: backendInfos, client: readyClient})
+	mux.HandleFunc("GET /debug/vars", debugVarsHandler)
 	mux.Handle("/", proxy)
 
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           mux,
-		ReadHeaderTimeout: 100 * time.Millisecond,
-		ReadTimeout:       200 * time.Millisecond,
-		WriteTimeout:      200 * time.Millisecond,
+		ReadHeaderTimeout: 500 * time.Millisecond,
+		ReadTimeout:       500 * time.Millisecond,
+		WriteTimeout:      500 * time.Millisecond,
 		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    4096,
 	}
 
-	log.Printf("Proxy starting on port %s, backends: %v\n", port, backendsList)
+	log.Printf("Proxy starting on port %s, backends: %v (GOMAXPROCS=%d)\n",
+		port, backendsList, runtime.GOMAXPROCS(0))
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Proxy error: %v", err)
 	}

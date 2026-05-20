@@ -102,14 +102,15 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ready", h.Ready)
+	mux.HandleFunc("GET /debug/vars", h.DebugVars)
 	mux.HandleFunc("POST /fraud-score", h.FraudScore)
 
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           mux,
-		ReadHeaderTimeout: 100 * time.Millisecond,
-		ReadTimeout:       200 * time.Millisecond,
-		WriteTimeout:      200 * time.Millisecond,
+		ReadHeaderTimeout: 500 * time.Millisecond,
+		ReadTimeout:       500 * time.Millisecond,
+		WriteTimeout:      500 * time.Millisecond,
 		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    4096,
 	}
