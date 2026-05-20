@@ -41,7 +41,7 @@ func NewIVFIndex(vectors []vector.Vector14, labels []uint8, centroids []vector.V
 // cluster is pathologically large, which happens only with a broken index.
 func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) {
 	const (
-		nprobe              = 2
+		nprobe              = 3
 		maxScanPerCluster   = 5000
 	)
 
@@ -55,6 +55,7 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 		dist int32
 	}
 	nearest := [nprobe]centroidDist{
+		{dist: math.MaxInt32},
 		{dist: math.MaxInt32},
 		{dist: math.MaxInt32},
 	}

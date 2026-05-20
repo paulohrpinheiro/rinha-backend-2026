@@ -177,20 +177,23 @@ por 5 minutos).
 | **v27** | **diag + CPU 0.10 + timeouts 500ms + semaf 256 + nprobe=2** | **10.006** | **8.955** | 2002ms | **−6000** |
 | **v28** | **reverte timeouts 200ms (1 diff)** | **12.321** | **3.173** | 2002ms | **−6000** |
 | **v29** | **proxy 0.15 CPU (config v26)** | **9.840** | **11.765** | 2002ms | **−6000** |
+| **v30** | **semáforo 1024 (1 diff)** | **5.550** | **33.772** | **2001ms** | **−6000** |
 
-### Análise: CPU do proxy é o gargalo (confirmado)
+### Análise: isolação de variáveis confirma 2 fatores
 
-| Métrica | v26 (p=0.15) | v27 (p=0.10) | v28 (p=0.10) | v29 (p=0.15) |
-|---------|:-----------:|:-----------:|:-----------:|:-----------:|
-| HTTP errors | 5.400 | 10.006 | 12.321 | 9.840 |
-| Corretos (TP+TN) | 27.100 | 8.744 | 3.101 | 11.503 |
-| Processados | 33.086 | 18.961 | 15.494 | 21.605 |
-| Fantasmas | 21.014 | 35.139 | 38.606 | 32.495 |
-| Failure rate | 18.09% | 53.88% | 79.99% | 46.76% |
+| Métrica | v26 | v27 | v28 | v29 | v30 |
+|---------|:---:|:---:|:---:|:---:|:---:|
+| Proxy CPU | 0.15 | 0.10 | 0.10 | 0.15 | 0.15 |
+| Semáforo | 1024 | 256 | 256 | 256 | **1024** |
+| nprobe | 3 | 2 | 2 | 2 | 2 |
+| Processados | 33.086 | 18.961 | 15.494 | 21.605 | **39.322** |
+| Failure rate | 18.09% | 53.88% | 79.99% | 46.76% | **15.95%** |
+| p99 | 2002ms | 2002ms | 2002ms | 2002ms | 2001ms |
 
-O v29 confirma que a CPU do proxy é relevante (21.6k vs 15.5k do v28, +39%),
-mas ainda 35% abaixo do v26 (33.1k) com a mesma CPU. Diferenças restantes:
-semáforo 256 (v26 usava 1024) e nprobe=2 (v26 usava 3).
+O v30 é o **melhor resultado da série**: 39.3k processados (+19% vs v26).
+Failure rate = 15.95% — a **0.95pp** de sair do corte de −3000.
+p99 = 2001.42ms — a **1.42ms** do corte.
+Com CPU e semáforo restaurados, o fator restante é **nprobe=2 vs 3**.
 
 ### Lições Aprendidas
 

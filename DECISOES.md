@@ -1938,3 +1938,24 @@ do k6 que o semáforo 1024 absorveria.
 - Se permanecer em ~21k, o fator restante é nprobe=2 vs 3.
 - O benchmark local não diferencia (ambos passam com p99 ~3ms),
   então a validação depende do teste oficial.
+
+---
+
+## ADR-57: nprobe=3 restaurando recall do v26 (v31)
+
+**Contexto**: O v30 restaurou proxy 0.15 CPU e semáforo 1024, atingindo o
+melhor resultado da série: 39.322 processados, failure_rate 15.95% — a apenas
+0.95pp do corte de 15%. O último fator diferente do v26 é nprobe=2 (v26 usava 3).
+
+**Decisão**: Restaurar nprobe=3. Com índice balanceado (ADR-45), 3 clusters
+× 5000 vetores = ~15.000 comparações (~130μs vs ~90μs do nprobe=2). O custo
+extra de 40μs por consulta é aceitável se melhorar o recall e reduzir FP/FN.
+A redução de FP/FN pode baixar o failure_rate abaixo de 15%, eliminando o
+corte de −3000 no detection_score.
+
+**Arquivos alterados**: `internal/index/index.go`.
+
+**Consequências**:
+- Se failure_rate cair abaixo de 15%, score sobe de −6000 para −3000.
+- Se também reduzir o p99 abaixo de 2000ms, score pode virar positivo.
+- nprobe=3 é a configuração original do v26, que teve 27.100 corretos.
