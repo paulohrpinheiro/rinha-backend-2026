@@ -2107,3 +2107,36 @@ Dois bugs de contagem de caracteres nas chaves JSON:
 **Consequências**:
 - TxCount24h e RequestedAt agora são parseados corretamente.
 - FN deve cair de 10.598 para ~350 (patamar normal do v30).
+
+---
+
+## ADR-63: v35 — primeiro score não-piso da série (−3564)
+
+**Contexto**: O v35 corrigiu dois bugs de keyLen no parser JSON (ADR-62) que
+causavam 10.598 FN no v34. Com o parser funcionando corretamente, o resultado
+oficial foi o melhor da história do projeto.
+
+**Resultado oficial (v35, commit fb7c6f1)**:
+
+| Métrica | v30 (codec) | v35 (parser) | Delta |
+|---------|:----------:|:----------:|:-----:|
+| HTTP errors | 5.550 | 1.812 | −67% |
+| Processados | 39.322 | 49.964 | +27% |
+| Corretos | 33.052 | 47.098 | +42% |
+| Failure rate | 15.95% | **5.74%** | −10pp |
+| p99 | 2001.42ms | 2000.92ms | −0.5ms |
+| **Score** | **−6000** | **−3564** | **+2436** |
+
+Pela primeira vez, o detection_score NÃO acionou o corte de −3000:
+- rate_component: +649.9 (positivo)
+- absolute_penalty: −1214.64
+- detection_score: −564.73
+
+O p99_score ainda corta em −3000 (2000.92ms > 2000ms), mas a margem é
+de apenas 0.92ms. Se o p99 cair abaixo de 2000ms, o score final será −564.
+
+**Conclusão**: o parser JSON manual + proxy forwardando JSON bruto é MUITO
+superior ao codec binário. A simplificação do proxy (sem parsing, sem encode)
+reduziu HTTP errors em 67% e aumentou o throughput em 27%.
+
+**Estratégia para v36**: reduzir p99 abaixo de 2000ms. Alvo: score = −564.

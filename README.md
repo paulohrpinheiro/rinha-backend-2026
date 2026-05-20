@@ -180,8 +180,25 @@ por 5 minutos).
 | **v30** | **semáforo 1024 (1 diff)** | **5.550** | **33.772** | **2001ms** | **−6000** |
 | **v31** | **nprobe=3 (recall)** | **6.873** | **17.806** | 2002ms | **−6000** |
 | **v32** | **nprobe=2 + client timeout 200ms** | **8.951** | **22.781** | 2002ms | **−6000** |
+| **v33** | **GOMEMLIMIT=60MiB (estrutural)** | — | — | — | **não submetido** |
+| **v34** | **parser JSON manual + proxy forward bruto** | **3.783** | **35.788** | 2002ms | **−6000** |
+| **v35** | **parser corrigido (keyLen fix)** | **1.812** | **48.152** | **2001ms** | **−3564 🎉** |
 
-### Conclusão: tuning de parâmetros chegou ao limite
+### 🎉 PRIMEIRO SCORE NÃO-PISO: −3564 (v35)
+
+| Métrica | v30 (codec) | v35 (parser) | Delta |
+|---------|:----------:|:----------:|:-----:|
+| HTTP errors | 5.550 | 1.812 | −67% |
+| Processados | 39.322 | 49.964 | +27% |
+| Corretos (TP+TN) | 33.052 | 47.098 | +42% |
+| Failure rate | 15.95% | **5.74%** | −10pp |
+| p99 | 2001.42ms | 2000.92ms | −0.5ms |
+| Detection score | −3000 (cut) | **−564 (no cut)** | +2436 |
+| Final score | −6000 | **−3564** | **+2436** |
+
+O parser JSON manual + proxy forwardando JSON bruto é MUITO superior ao codec binário.
+Failure rate caiu de 15.95% para 5.74% — detection_score NÃO aciona mais o corte.
+Resta apenas o p99 a **0.92ms** do corte. Se baixar para <2000ms, score = −564.
 
 | Métrica | v26 | v27 | v28 | v29 | v30 |
 |---------|:---:|:---:|:---:|:---:|:---:|
