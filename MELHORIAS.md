@@ -205,7 +205,8 @@ Aquece caches de CPU, resolve page faults, compila hot paths.
 | v37 | timeouts 200ms + proxy 0.17 | 1.587 | 5.4% | 2001ms | −3503 |
 | v38 | proxy 0.19 + client 200ms | **57** | **2.2%** | **195ms** | **+1082 🏆** |
 | v39 | nprobe=3 (neutro) | 70 | 2.3% | 192ms | +1073 |
-| **v40** | **K=7 + nprobe=2** | **?** | **?** | **?** | **?** |
+| v40 | K=7, thr=0.6 | 112 | 2.1% | 201ms | +922 |
+| **v41** | **K=7, thr=0.572** | **?** | **?** | **?** | **?** |
 
 ### Análise de tendência
 

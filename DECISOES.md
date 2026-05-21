@@ -2453,3 +2453,65 @@ que a decisão é binária baseada em apenas 5 referências — cada uma com pes
 quanto FN. O threshold efetivo mais conservador (71.4% vs 60%) deve reduzir
 FP (menos falsas acusações), mas pode aumentar FN. O efeito líquido depende
 da distribuição dos vizinhos.
+
+---
+
+## ADR-72: v40 — K=7 reduz FP 54% mas explode FN 64%
+
+**Contexto**: O v40 testou K=7 com threshold 0.6 mantido. A hipótese era que
+diluir o peso de cada vizinho (14% vs 20%) reduziria sensibilidade a outliers.
+
+**Resultado oficial (v40, 2026-05-21)**:
+
+| Métrica | v38 (K=5) | v40 (K=7) | Delta |
+|---------|:---:|:---:|:-----:|
+| HTTP errors | 57 | 112 | +55 |
+| **FP** | **733** | **336** | **−397 (−54%)** ✅ |
+| **FN** | **413** | **677** | **+264 (+64%)** ❌ |
+| p99 | 195ms | 201ms | +6ms |
+| p99_score | 709.45 | 696.86 | −12.59 |
+| detection_score | +372.75 | +225.39 | −147.36 |
+| **final_score** | **+1082** | **+922** | **−160** |
+
+**Análise**:
+
+1. **FP caiu 54%** — o efeito conservador se confirmou. Com threshold 0.6 e
+   K=7, negar uma transação exige 5/7=71.4% de vizinhos fraudadores (vs
+   3/5=60% antes). Menos falsas acusações.
+
+2. **FN explodiu 64%** — o sistema passou a aprovar transações que antes
+   negava. O cutoff efetivo mudou: 4/7=57.1% → approve, quando 3/5=60%
+   era deny. Isso deixou passar muito mais fraudes.
+
+3. **Score caiu 160 pontos** — o aumento em FN (+792 em E) superou a redução
+   em FP (−397 em E). HTTP errors também pioraram (+55, +275 em E).
+
+4. **Threshold 0.6 é inadequado para K=7** — o ponto de corte natural mudou:
+   K=5: {0,1,2}→approve, {3,4,5}→deny (corte em 3/5)
+   K=7: {0,1,2,3,4}→approve, {5,6,7}→deny (corte em 5/7)
+
+**Conclusão**: K=7 com threshold 0.6 é conservador demais. O threshold precisa
+ser ajustado para manter equivalência com K=5. O threshold equivalente é
+4/7=0.5714, então usar 0.572 restaura o mesmo ponto de corte.
+
+---
+
+## ADR-73: v41 — K=7 + threshold 0.572 (equivalente a K=5 thr=0.6)
+
+**Contexto**: A v40 mostrou que K=7 reduz FP mas com threshold 0.6 o custo em
+FN é proibitivo. O ajuste natural é recalibrar o threshold para o equivalente.
+
+**Decisão**: Manter K=7, ajustar threshold de 0.6 para 0.572.
+
+- **Threshold 0.572**: 4/7=0.5714 < 0.572 → approve. 5/7=0.7143 ≥ 0.572 → deny.
+- **Equivalência**: mesmo ponto de corte que K=5 thr=0.6 (3/5=0.6 ≥ 0.6 → deny).
+- **Vantagem**: K=7 dilui outliers (peso 14% vs 20%), potencialmente reduzindo
+  tanto FP quanto FN para o mesmo ponto de corte.
+
+**Arquivos alterados**:
+- `internal/handler/fraud.go`: threshold 0.6 → 0.572
+- `cmd/proxy/main.go`: fraudResponses com approved recalculado para thr=0.572
+
+**Hipótese**: Com threshold ajustado para equivalência, K=7 deve performar igual
+ou melhor que K=5 (v38), pois a decisão é baseada em mais vizinhos (7 vs 5),
+diluindo o efeito de outliers sem alterar o ponto de corte.

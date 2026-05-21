@@ -140,17 +140,25 @@ README.md              # Este arquivo
 nprobe=3 varreu 50% mais vetores sem nenhum ganho de recall. FN idêntico prova
 que nprobe=2 já encontra os vizinhos corretos.
 
-### 🎯 v40 — Submissão atual (pendente)
+### Resultado v40: K=7 thr=0.6 — FP −54%, FN +64%
 
-| Mudança | v39 | v40 |
+| Métrica | v38 | v40 | Delta |
+|:--------|:---:|:---:|:-----:|
+| FP | 733 | 336 | −54% ✅ |
+| FN | 413 | 677 | +64% ❌ |
+| Score | +1082 | +922 | −160 |
+
+Threshold 0.6 com K=7 é conservador demais. Corte em 5/7=71.4% vs 3/5=60%.
+
+### 🎯 v41 — Submissão atual (pendente)
+
+| Mudança | v40 | v41 |
 |:--------|:---:|:---:|
-| K (vizinhos) | 5 | **7** |
-| nprobe | 3 | **2** |
-| Threshold | 0.6 | 0.6 |
+| K (vizinhos) | 7 | 7 |
+| Threshold | 0.6 | **0.572** |
 
-**Hipótese**: K=7 reduz sensibilidade a outliers (peso 14% vs 20% por vizinho).
-Com threshold 0.6, 4/7=0.571 → approve (mais conservador que 3/5=0.6 → deny).
-Deve reduzir FP, efeito em FN incerto.
+**Hipótese**: Threshold 0.572 restaura equivalência com K=5 thr=0.6
+(4/7=0.571 → approve, 5/7=0.714 → deny), mantendo estabilidade de K=7.
 
 ### Evolução completa
 
@@ -176,7 +184,8 @@ Deve reduzir FP, efeito em FN incerto.
 | v37 | proxy 0.17 CPU | **1.587** | **5.4%** | 2001ms | **−3503** |
 | v38 | proxy 0.19, client 200ms | **57** | **2.2%** | **195ms** | **+1082 🏆** |
 | v39 | nprobe=3 (neutro) | 70 | 2.3% | 192ms | +1073 |
-| **v40** | **K=7, nprobe=2** | **?** | **?** | **?** | **aguardando** |
+| v40 | K=7, thr=0.6 | 112 | 2.1% | 201ms | +922 |
+| **v41** | **K=7, thr=0.572** | **?** | **?** | **?** | **aguardando** |
 
 ### Marcos da série
 
@@ -251,7 +260,7 @@ Cada campo é normalizado para [0,1] seguindo as fórmulas em [REGRAS_DE_DETECCA
 ### 5. Decisão
 ```
 fraud_score = fraudes_entre_os_7 / 7
-approved = fraud_score < 0.6
+approved = fraud_score < 0.572
 ```
 
 ---

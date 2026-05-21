@@ -28,8 +28,8 @@ import (
 )
 
 // fraudResponses holds the 8 possible JSON responses pre-computed.
-// Zero serialization in the hot path — just index by fraud count (K=7).
-// fraudScore = fraudCount/7 → 0.0, 0.143, 0.286, 0.429, 0.571, 0.714, 0.857, 1.0
+// Zero serialization in the hot path — just index by fraud count (K=7, thr=0.572).
+// 4/7=0.5714 < 0.572 → approved; 5/7=0.7143 ≥ 0.572 → denied
 var fraudResponses = [8][]byte{
 	[]byte(`{"approved":true,"fraud_score":0.0}`),
 	[]byte(`{"approved":true,"fraud_score":0.14285714285714285}`),

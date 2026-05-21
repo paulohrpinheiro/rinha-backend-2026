@@ -135,7 +135,7 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 
 	// 5. Calculate fraud score and decision
 	fraudScore := float64(fraudCount) / 7.0
-	approved := fraudScore < 0.6
+	approved := fraudScore < 0.572
 
 	// 6. Write binary response (9 bytes: approved bool + fraud_score float64)
 	w.Header().Set("Content-Type", "application/octet-stream")
