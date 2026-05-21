@@ -2743,3 +2743,59 @@ o threshold 0.6 e K=5. A recalibração exigiria grid search sobre o dataset.
 **Lição**: Mudanças na representação vetorial exigem recalibração. O threshold
 e K foram otimizados para int8+Manhattan ao longo de 40+ versões. Uma migração
 para int16+Euclidiana precisaria de um processo separado de tuning.
+
+---
+
+## ADR-81: v44 — Platô confirmado: score +1076, config estável
+
+**Contexto**: A v44 reverteu integralmente para int8+Manhattan (v42 config).
+O resultado confirma que a configuração é estável e reprodutível.
+
+**Resultado oficial (v44, 2026-05-21)**:
+
+| Métrica | v38 | v42 | v44 | Média |
+|---------|:---:|:---:|:---:|:-----:|
+| FP | 733 | 734 | 735 | 734 |
+| FN | 413 | 412 | 413 | 413 |
+| HTTP | 57 | 70 | 67 | 65 |
+| p99 | 195ms | 192ms | 192ms | 193ms |
+| **Score** | **+1082** | **+1075** | **+1076** | **+1078** |
+
+Três versões independentes com a mesma configuração (int8+Manhattan+K=5+thr=0.6)
+produzem resultados estatisticamente idênticos (±7 pontos). O score de ~+1075
+é o platô da arquitetura atual.
+
+### Análise do platô
+
+Das 7 versões tentando melhorar detecção (v39-v44), nenhuma superou a v38:
+
+| Versão | Mudança | Score | Resultado |
+|:------:|:--------|:-----:|:----------|
+| v38 | baseline K=5 | +1082 | referência |
+| v39 | nprobe=3 | +1073 | neutro |
+| v40 | K=7, thr=0.6 | +922 | pior |
+| v41 | K=7, thr=0.572 | +866 | pior |
+| v42 | reverte K=5 + diag | +1075 | = baseline |
+| v43 | int16+Euclidiana | −2296 | quebrou |
+| v44 | reverte int8 | +1076 | = baseline |
+
+As otimizações de parâmetros (nprobe, K, threshold) estão esgotadas. O piso
+de ~2.1% de erro (FP+FN≈1147) parece ser inerente a int8+Manhattan+IVF+K=5.
+
+### Caminhos à frente
+
+1. **Árvore de partições** (como o campeão): substituir IVF K-means por
+   particionamento baseado em features (has_last_tx, is_online, card_present,
+   unknown_merchant, mcc_risk). Exige reescrever build_index e formato do índice.
+
+2. **Recalibração com int16+Euclidiana**: grid search de threshold e K sobre
+   o dataset de teste para encontrar a combinação ótima no novo espaço.
+
+3. **Ensemble ou weighted KNN**: em vez de threshold fixo, usar pesos baseados
+   na distância dos vizinhos (vizinhos mais próximos têm mais peso).
+
+4. **Redução de HTTP errors a zero**: ajuste fino de semáforo e timeouts para
+   eliminar os ~65 HTTP errors residuais. Ganho máximo: ~325 pontos em E.
+
+5. **Aceitar o platô**: score +1075 é o 2º melhor entre implementações Go
+   conhecidas, atrás apenas do campeão C (6000).

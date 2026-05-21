@@ -186,10 +186,15 @@ FP/FN idênticos à v38 (±1). Score +1075 ≈ +1082. Config K=5 thr=0.6 é est�
 Mudança de representação quebrou o espaço vetorial. Threshold 0.6/K=5 ficou
 inadequado — sistema aprova quase tudo.
 
-### 🎯 v44 — Submissão atual (pendente)
+### v44: Platô confirmado (+1076)
 
-Reverte integralmente para int8 + Manhattan (config v42 estável).
-Lição: mudanças no espaço vetorial exigem recalibração completa.
+Três versões (v38/v42/v44) com score ~+1075. Configuração estável atingida.
+
+### Próximos passos
+
+Ver [DECISOES.md](./DECISOES.md#adr-81-v44--platô-confirmado-score-1076-config-estável) para
+análise do platô e caminhos à frente (árvore de partições, recalibração int16,
+weighted KNN, zerar HTTP errors).
 
 ### Evolução completa
 
@@ -219,7 +224,10 @@ Lição: mudanças no espaço vetorial exigem recalibração completa.
 | v41 | K=7, thr=0.572 | 161 | 2.2% | 206ms | +866 |
 | v42 | reverte K=5 + diag | 70 | 2.3% | 192ms | +1075 |
 | v43 | int16+Euclidiana ❌ | 56 | 35.9% | 198ms | −2296 |
-| **v44** | **reverte int8+Manhattan** | **?** | **?** | **?** | **aguardando** |
+| v44 | reverte int8 (platô) | 67 | 2.3% | 192ms | +1076 |
+
+> **Platô alcançado**: 3 versões idênticas (v38/v42/v44) com score ~+1075.
+> Config: int8 + Manhattan + K=5 + thr=0.6 + IVF 1000 clusters + nprobe=2.
 
 ### Marcos da série
 
