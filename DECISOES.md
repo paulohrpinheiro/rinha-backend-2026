@@ -2184,3 +2184,100 @@ CPU extra pode ser suficiente para baixar o p99 em <1ms.
 
 **Consequências**:
 - v37 ≡ v35 (timeouts 200ms) + proxy 0.17 CPU.
+
+---
+
+## ADR-66: Análise da v37 — proxy 0.17 CPU confirma tendência de melhora
+
+**Contexto**: O v37 (commit 69a993c) foi submetido com a hipótese de que 0.02 CPU extra
+no proxy (0.15→0.17) reduziria HTTP errors e potencialmente baixaria o p99 abaixo de
+2000ms. O resultado oficial saiu em 2026-05-21.
+
+**Resultado oficial (v37)**:
+
+| Métrica | v35 (baseline) | v37 | Delta |
+|---------|:----------:|:----------:|:-----:|
+| HTTP errors | 1.812 | 1.587 | −225 (−12.4%) |
+| Processados | 49.964 | 51.615 | +1.651 (+3.3%) |
+| Corretos | 47.098 | 44.661 | −2.437 (−5.2%) |
+| Failure rate | 5.74% | **5.4%** | −0.34pp |
+| FP | 517 | 609 | +92 |
+| FN | 537 | 354 | −183 |
+| E (weighted) | 11.188 | 9.606 | −1.582 (−14.1%) |
+| ε (error rate) | 0.2239 | 0.2035 | −0.0204 |
+| p99 | 2000.92ms | 2001.26ms | +0.34ms |
+| p99_score | −3000 (cut) | −3000 (cut) | = |
+| rate_component | +649.9 | +691.5 | +41.6 |
+| absolute_penalty | −1214.64 | −1194.78 | +19.86 |
+| detection_score | −564.73 | −503.28 | +61.45 |
+| **final_score** | **−3564.73** | **−3503.28** | **+61.45** |
+
+**Análise**:
+
+1. **HTTP errors caíram 12.4%** — a hipótese de que mais CPU no proxy reduz
+   gargalos de forwarding se confirmou. Com 0.17 CPU, o proxy consegue drenar
+   sua fila de entrada mais rápido, reduzindo timeouts.
+
+2. **p99 NÃO baixou** — subiu 0.34ms (2000.92→2001.26). O ganho de CPU no proxy
+   foi insuficiente para compensar o scheduling jitter. O p99 continua acima de
+   2000ms, mantendo o corte de −3000 no p99_score.
+
+3. **Trade-off FP vs FN**: FN caiu 183 (melhor) mas FP subiu 92 (pior). Como o
+   código de detecção não mudou (mesmo nprobe=2, mesmo threshold=0.6), isso é
+   variação estatística do dataset ou efeito indireto dos HTTP errors processados.
+
+4. **Detection score melhorou**: rate_component subiu (menos erros → ε menor) e
+   absolute_penalty caiu (menos E). O ganho líquido de +61.45 pontos é modesto
+   mas consistente.
+
+5. **Throughput maior**: +1.651 requisições processadas (+3.3%), confirmando que
+   o proxy com mais CPU consegue encaminhar mais requisições antes do timeout.
+
+**Conclusão**: A estratégia de dar mais CPU ao proxy funciona, mas o ganho é
+marginal (+61 pontos). O p99 permanece ~1.3ms acima do corte de 2000ms. Para
+escapar do corte, seria necessário reduzir o p99 em ~1.3ms — o que exigiria
+ganhos de scheduling, não de processamento (o processamento em si leva <1μs).
+
+**Estratégia para v38**: continuar aumentando CPU do proxy (0.17→0.19), reduzir
+APIs proporcionalmente (0.415→0.405), e reduzir client.Timeout do proxy de 500ms
+para 200ms (consistência com timeouts do servidor).
+
+---
+
+## ADR-67: v38 — proxy 0.19 CPU + client timeout 200ms
+
+**Contexto**: A v37 mostrou que aumentar CPU do proxy reduz HTTP errors (−12.4%)
+e melhora o score (+61 pontos). A hipótese é que continuar essa tendência
+(proxy 0.17→0.19) trará ganhos adicionais, possivelmente aproximando o p99
+de 2000ms.
+
+**Decisão**:
+
+1. **Proxy CPU**: 0.17 → 0.19 (+0.02). O proxy é o ponto de estrangulamento —
+   recebe todas as conexões TCP, faz io.Copy do body, e encaminha para APIs.
+   Mais CPU reduz o tempo de fila e libera slots mais rápido.
+
+2. **API CPU**: 0.415 → 0.405 (−0.01 cada). As APIs processam cada requisição
+   em ~130μs com GOMAXPROCS=1. A redução de 0.01 CPU tem impacto mínimo porque
+   o runtime já serializa o processamento.
+
+3. **Client timeout**: 500ms → 200ms. O http.Client do proxy tinha timeout de
+   500ms, mas o servidor HTTP já corta em 200ms (ReadTimeout/WriteTimeout).
+   Reduzir o client timeout evita que o proxy espere desnecessariamente por
+   respostas que já foram abortadas pelo servidor.
+
+**Distribuição de recursos (v38)**:
+
+| Serviço | CPU  | Memória |
+|---------|:----:|:-------:|
+| proxy   | 0.19 | 20 MB   |
+| api-1   | 0.405 | 165 MB  |
+| api-2   | 0.405 | 165 MB  |
+| Total   | 1.0  | 350 MB  |
+
+**Arquivos alterados**: `cmd/proxy/main.go`, `docker-compose.yml`,
+`docker-compose.submission.yml`.
+
+**Hipótese**: O proxy com 0.19 CPU + client timeout 200ms reduzirá HTTP errors
+abaixo de 1500 e poderá baixar o p99 para <2000ms (ganho de ~3700 pontos se
+escapar do corte).

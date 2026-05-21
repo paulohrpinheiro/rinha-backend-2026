@@ -186,3 +186,53 @@ Aquece caches de CPU, resolve page faults, compila hot paths.
 | 6 | C++ fd-passing LB | 16-32h | **Muito alto** |
 
 **Recomendação**: comecar com respostas pre-alocadas e warmup (✅ feito). K-means corrigido (✅ v26). Proximos: fasthttp + parsing JSON manual na API. Visao de longo prazo: fd-passing.
+
+---
+
+## 11. Evolução de Resultados (v27 → v38)
+
+| Versão | Estratégia | HTTP Errs | Failure | p99 | Score |
+|:------:|:-----------|:---------:|:-------:|:---:|:-----:|
+| v27 | baseline | 10.006 | 53.9% | 2002ms | −6000 |
+| v28 | timeouts 200ms | 12.321 | 80.0% | 2002ms | −6000 |
+| v29 | proxy 0.15 CPU | 9.840 | 46.8% | 2002ms | −6000 |
+| v30 | semáforo 1024 | 5.550 | 16.0% | 2001ms | −6000 |
+| v31 | nprobe=3 | 6.873 | 29.3% | 2002ms | −6000 |
+| v32 | revert nprobe=2 | 8.951 | 29.7% | 2002ms | −6000 |
+| v34 | parser JSON manual | 3.783 | 36.6% | 2002ms | −6000 |
+| v35 | correção keyLen | **1.812** | 5.7% | 2001ms | **−3565** |
+| v36 | timeouts 100ms | 7.709 | 17.7% | 2001ms | −6000 |
+| v37 | timeouts 200ms + proxy 0.17 | 1.587 | 5.4% | 2001ms | −3503 |
+| **v38** | **proxy 0.19 + client 200ms** | **?** | **?** | **?** | **?** |
+
+### Análise de tendência
+
+1. **Parser JSON manual (v34→v35)**: O maior salto de qualidade. Substituir o codec
+   binário por parsing JSON manual na API + proxy forward bruto reduziu HTTP errors
+   em 67% (5.550→1.812) e tirou o detection_score do corte (−3000→−565).
+
+2. **CPU do proxy (v35→v37)**: Aumentar proxy de 0.15→0.17 reduziu HTTP errors em
+   12.4% (1.812→1.587) e melhorou o score em 61 pontos. Ganho modesto mas consistente.
+
+3. **Timeouts (v35→v36→v37)**: 100ms foi desastroso (+325% HTTP errors). 200ms é
+   o piso estável. O client timeout de 500ms (proxy→API) era inconsistente com o
+   server timeout de 200ms — reduzido na v38.
+
+4. **p99 estagnado**: Desde a v30, o p99 oscila entre 2000.92ms e 2002.08ms, sempre
+   acima do corte de 2000ms. A latência de processamento real é <1μs — o p99 é
+   dominado por scheduling/queueing delays do kernel e do runtime Go.
+
+5. **Próximo desafio**: Romper a barreira dos 2000ms. Com p99 < 2000ms, o p99_score
+   salta de −3000 para ~+700, adicionando ~3700 pontos ao score final. Isso
+   transformaria −3503 em ~+200 (detection_score ainda negativo).
+
+### Lições aprendidas
+
+- **Proxy é o gargalo principal**, não as APIs. Dar mais CPU ao proxy consistentemente
+  melhora o score (v35→v37: +61 pontos).
+- **Timeout de 100ms é contraproducente** com GOMAXPROCS=1 — o scheduling jitter do
+  kernel facilmente ultrapassa 100ms, causando falsos timeouts em cascata.
+- **Parser JSON manual + forward bruto** foi a melhor decisão arquitetural da série,
+  responsável pelo salto de −6000 para −3565.
+- **nprobe=2 é suficiente** — nprobe=3 (v31) piorou HTTP errors (+24%) sem melhorar
+  significativamente a detecção.

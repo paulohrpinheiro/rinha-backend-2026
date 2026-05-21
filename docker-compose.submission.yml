@@ -23,7 +23,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.17"
+          cpus: "0.19"
           memory: "20MB"
 
   api-1:
@@ -42,7 +42,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.415"
+          cpus: "0.405"
           memory: "165MB"
 
   api-2:
@@ -61,7 +61,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.415"
+          cpus: "0.405"
           memory: "165MB"
 
 # warmup removed: runs inline in the API binary (handler.Warmup())
