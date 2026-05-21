@@ -175,16 +175,21 @@ encontradas — parser validado).
 
 FP/FN idênticos à v38 (±1). Score +1075 ≈ +1082. Config K=5 thr=0.6 é estável.
 
-### 🎯 v43 — Submissão atual (pendente)
+### Resultado v43: int16+Euclidiana — quebra detecção
 
-| Mudança | v42 | v43 |
-|:--------|:---:|:---:|
-| Vetor | int8 (0-127) | **int16 (0-10000)** |
-| Distância | Manhattan (L1) | **Euclidiana² (L2²)** |
-| Precisão | 128 níveis | 10000 níveis (78×) |
+| Métrica | v42 | v43 | Delta |
+|:--------|:---:|:---:|:-----:|
+| FP | 734 | 196 | −73% |
+| **FN** | **412** | **19.118** | **+4.540%** |
+| Score | +1075 | −2296 | −3.371 |
 
-**Hipótese**: int16 + Euclidiana (como o campeão) elimina perda de precisão
-da quantização int8, melhorando a ordenação KNN. Alvo: FP+FN < 800.
+Mudança de representação quebrou o espaço vetorial. Threshold 0.6/K=5 ficou
+inadequado — sistema aprova quase tudo.
+
+### 🎯 v44 — Submissão atual (pendente)
+
+Reverte integralmente para int8 + Manhattan (config v42 estável).
+Lição: mudanças no espaço vetorial exigem recalibração completa.
 
 ### Evolução completa
 
@@ -213,7 +218,8 @@ da quantização int8, melhorando a ordenação KNN. Alvo: FP+FN < 800.
 | v40 | K=7, thr=0.6 | 112 | 2.1% | 201ms | +922 |
 | v41 | K=7, thr=0.572 | 161 | 2.2% | 206ms | +866 |
 | v42 | reverte K=5 + diag | 70 | 2.3% | 192ms | +1075 |
-| **v43** | **int16 + Euclidiana** | **?** | **?** | **?** | **aguardando** |
+| v43 | int16+Euclidiana ❌ | 56 | 35.9% | 198ms | −2296 |
+| **v44** | **reverte int8+Manhattan** | **?** | **?** | **?** | **aguardando** |
 
 ### Marcos da série
 
@@ -282,8 +288,8 @@ Cada campo é normalizado para [0,1] seguindo as fórmulas em [REGRAS_DE_DETECCA
 - Encontra os 2 centroides mais próximos (nprobe=2) entre 1.000 centroides
 - Busca os 5 vizinhos mais próximos dentro desses clusters (até 5.000 vetores por cluster)
 - Distribuição balanceada: clusters de 914 a 6.109 vetores (K-means corrigido, ADR-45)
-- Latência de busca: ~100µs (nprobe=2, K=5, Euclidiana²)
-- Usa distância Euclidiana ao quadrado (int16, escala 10000)
+- Latência de busca: ~90µs (nprobe=2, K=5)
+- Usa distância Manhattan com loop unrolled
 
 ### 5. Decisão
 ```
@@ -339,7 +345,7 @@ Baixe do [repositório oficial da Rinha](https://github.com/zanfranceschi/rinha-
 |----------|:-----:|:---------:|
 | ManhattanDistance (14 dims) | ~14 ns | 0 B/op |
 | Normalize (payload -> vetor) | ~100 ns | 0 B/op |
-| IVF Search (Normalize + Search, K=5, nprobe=2) | ~100 µs | 0 B/op |
+| IVF Search (Normalize + Search, K=5, nprobe=2) | ~90 µs | 0 B/op |
 
 ### Benchmark de carga realista
 

@@ -61,7 +61,7 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 	}
 
 	for c := 0; c < idx.nClusters; c++ {
-		d := vector.EuclideanDistanceSquared(query, &idx.Centroids[c])
+		d := vector.ManhattanDistance(query, &idx.Centroids[c])
 		if d < nearest[nprobe-1].dist {
 			pos := nprobe - 1
 			for pos > 0 && d < nearest[pos-1].dist {
@@ -100,7 +100,7 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 			stop = end
 		}
 		for i := start; i < stop; i++ {
-			dist := vector.EuclideanDistanceSquared(query, &idx.Vectors[i])
+			dist := vector.ManhattanDistance(query, &idx.Vectors[i])
 
 			if dist < topK[k-1].dist {
 				pos := k - 1

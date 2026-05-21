@@ -208,7 +208,8 @@ Aquece caches de CPU, resolve page faults, compila hot paths.
 | v40 | K=7, thr=0.6 | 112 | 2.1% | 201ms | +922 |
 | v41 | K=7, thr=0.572 | 161 | 2.2% | 206ms | +866 |
 | v42 | reverte K=5 + diag | 70 | 2.3% | 192ms | +1075 |
-| **v43** | **int16 + Euclidiana** | **?** | **?** | **?** | **?** |
+| v43 | int16+Euclidiana ❌ | 56 | 35.9% | 198ms | −2296 |
+| **v44** | **reverte int8+Manhattan** | **?** | **?** | **?** | **?** |
 
 ### Análise de tendência
 

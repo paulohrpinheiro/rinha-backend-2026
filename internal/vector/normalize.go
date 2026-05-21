@@ -1,5 +1,5 @@
 // Package vector implements the 14-dimensional vector normalization
-// and int16 quantization for the fraud detection system.
+// and int8 quantization for the fraud detection system.
 package vector
 
 import (
@@ -8,16 +8,15 @@ import (
 	"rinha-backend/internal/parser"
 )
 
-// Vector14 is a 14-dimensional vector quantized to int16.
-// Range: -1 (sentinel for missing data) or 0-10000 (for normalized [0,1] values).
-type Vector14 [14]int16
+// Vector14 is a 14-dimensional vector quantized to int8.
+// Range: -1 (sentinel for missing data) or 0-127 (for normalized [0,1] values).
+type Vector14 [14]int8
 
-const sentinel int16 = -1
-const scale = 10000.0
+const sentinel int8 = -1
 
-// Quantize converts a float64 in [0,1] to int16 in [0,10000].
+// Quantize converts a float64 in [0,1] to int8 in [0,127].
 // Special case: -1.0 is preserved as the sentinel value.
-func Quantize(v float64) int16 {
+func Quantize(v float64) int8 {
 	if v == -1.0 {
 		return sentinel
 	}
@@ -25,9 +24,9 @@ func Quantize(v float64) int16 {
 		return 0
 	}
 	if v >= 1.0 {
-		return int16(scale)
+		return 127
 	}
-	return int16(math.Round(v * scale))
+	return int8(math.Round(v * 127.0))
 }
 
 // clamp restricts v to the [0.0, 1.0] range.
@@ -41,24 +40,95 @@ func clamp(v float64) float64 {
 	return v
 }
 
-// EuclideanDistanceSquared computes the squared L2 distance between two int16 vectors.
+// ManhattanDistance computes the L1 distance between two int8 vectors.
 // This is optimized for inlining and auto-vectorization by the compiler.
-func EuclideanDistanceSquared(a, b *Vector14) int32 {
+func ManhattanDistance(a, b *Vector14) int32 {
+	// Manually unrolled for performance
 	var sum int32
-	d0 := int32(a[0]) - int32(b[0]); sum += d0 * d0
-	d1 := int32(a[1]) - int32(b[1]); sum += d1 * d1
-	d2 := int32(a[2]) - int32(b[2]); sum += d2 * d2
-	d3 := int32(a[3]) - int32(b[3]); sum += d3 * d3
-	d4 := int32(a[4]) - int32(b[4]); sum += d4 * d4
-	d5 := int32(a[5]) - int32(b[5]); sum += d5 * d5
-	d6 := int32(a[6]) - int32(b[6]); sum += d6 * d6
-	d7 := int32(a[7]) - int32(b[7]); sum += d7 * d7
-	d8 := int32(a[8]) - int32(b[8]); sum += d8 * d8
-	d9 := int32(a[9]) - int32(b[9]); sum += d9 * d9
-	d10 := int32(a[10]) - int32(b[10]); sum += d10 * d10
-	d11 := int32(a[11]) - int32(b[11]); sum += d11 * d11
-	d12 := int32(a[12]) - int32(b[12]); sum += d12 * d12
-	d13 := int32(a[13]) - int32(b[13]); sum += d13 * d13
+	d := int32(a[0]) - int32(b[0])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[1]) - int32(b[1])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[2]) - int32(b[2])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[3]) - int32(b[3])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[4]) - int32(b[4])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[5]) - int32(b[5])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[6]) - int32(b[6])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[7]) - int32(b[7])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[8]) - int32(b[8])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[9]) - int32(b[9])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[10]) - int32(b[10])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[11]) - int32(b[11])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[12]) - int32(b[12])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
+	d = int32(a[13]) - int32(b[13])
+	if d >= 0 {
+		sum += d
+	} else {
+		sum -= d
+	}
 	return sum
 }
 
@@ -74,8 +144,9 @@ type NormalizationConfig struct {
 	MCCRisk              map[string]float64
 }
 
-// Normalize converts a parsed transaction payload into a quantized
-// 14-dimensional vector with int16 precision (scale 10000).
+// Normalize converts a binary-decoded transaction payload into a quantized
+// 14-dimensional vector. It accepts *codec.Payload directly (zero allocations
+// for JSON strings).
 func Normalize(payload *parser.Payload, norm *NormalizationConfig) Vector14 {
 	var v Vector14
 
@@ -118,16 +189,16 @@ func Normalize(payload *parser.Payload, norm *NormalizationConfig) Vector14 {
 	// dim8: tx count 24h
 	v[8] = Quantize(clamp(float64(payload.TxCount24h) / norm.MaxTxCount24h))
 
-	// dim9: is_online (0 or 1 → 0 or 10000)
+	// dim9: is_online (0 or 1 → 0 or 127)
 	if payload.IsOnline {
-		v[9] = int16(scale)
+		v[9] = 127
 	} else {
 		v[9] = 0
 	}
 
 	// dim10: card_present (0 or 1)
 	if payload.CardPresent {
-		v[10] = int16(scale)
+		v[10] = 127
 	} else {
 		v[10] = 0
 	}
@@ -141,7 +212,7 @@ func Normalize(payload *parser.Payload, norm *NormalizationConfig) Vector14 {
 		}
 	}
 	if !known {
-		v[11] = int16(scale)
+		v[11] = 127
 	} else {
 		v[11] = 0
 	}
@@ -157,24 +228,4 @@ func Normalize(payload *parser.Payload, norm *NormalizationConfig) Vector14 {
 	v[13] = Quantize(clamp(payload.MerchantAvgAmount / norm.MaxMerchantAvgAmount))
 
 	return v
-}
-
-// ManhattanDistance is kept for backward compatibility with tests and diag.
-func ManhattanDistance(a, b *Vector14) int32 {
-	var sum int32
-	d := int32(a[0]) - int32(b[0]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[1]) - int32(b[1]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[2]) - int32(b[2]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[3]) - int32(b[3]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[4]) - int32(b[4]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[5]) - int32(b[5]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[6]) - int32(b[6]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[7]) - int32(b[7]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[8]) - int32(b[8]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[9]) - int32(b[9]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[10]) - int32(b[10]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[11]) - int32(b[11]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[12]) - int32(b[12]); if d >= 0 { sum += d } else { sum -= d }
-	d = int32(a[13]) - int32(b[13]); if d >= 0 { sum += d } else { sum -= d }
-	return sum
 }

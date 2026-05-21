@@ -2680,3 +2680,66 @@ Ainda cabe em 165 MB por API (84 MB vetores + labels + centroides + offsets < 12
 **Hipótese**: int16 com escala 10000 + distância euclidiana reduzirá o erro de
 quantização e melhorará a ordenação KNN, reduzindo FP e FN. Alvo: FP+FN < 800
 (vs ~1146 atual), score > +1500.
+
+---
+
+## ADR-79: v43 — int16 + Euclidiana QUEBRA detecção (FN explode 19.118)
+
+**Contexto**: A v43 migrou de int8+Manhattan para int16+Euclidiana, replicando
+duas características do campeão. O índice IVF foi reconstruído com K-means usando
+a nova distância. O resultado foi catastrófico.
+
+**Resultado oficial (v43, 2026-05-21)**:
+
+| Métrica | v42 (int8+L1) | v43 (int16+L2²) | Delta |
+|---------|:---:|:---:|:-----:|
+| FP | 734 | 196 | −73% |
+| **FN** | **412** | **19.118** | **+4.540%** |
+| TP | 23.459 | 4.758 | −80% |
+| Failure rate | 2.3% | **35.9%** | corte! |
+| detection_score | +357 | **−3000 (cut)** | −3.357 |
+| **final_score** | **+1.075** | **−2.296** | **−3.371** |
+
+**Análise**: O sistema passou a aprovar quase todas as transações. Apenas 196
+FP (falsas acusações), mas 19.118 FN (fraudes aprovadas). A mudança na
+representação vetorial alterou completamente a distribuição de vizinhos no
+espaço de busca:
+
+1. **Escala 10000× maior**: diferenças entre dimensões agora são ordens de
+   grandeza maiores, mudando a importância relativa de cada dimensão.
+
+2. **Distância euclidiana vs Manhattan**: L2 penaliza grandes diferenças
+   quadraticamente, favorecendo vizinhos com diferenças pequenas uniformes.
+
+3. **K-means recalibrado**: os clusters foram reagrupados com a nova distância,
+   mudando quais vetores são comparados em cada busca.
+
+O resultado líquido: os 5 vizinhos mais próximos agora raramente incluem
+fraudes suficientes para atingir o threshold de 3/5 (0.6).
+
+**Conclusão**: Mudar a representação vetorial requer recalibração completa do
+modelo (threshold, K, possivelmente nprobe). Não é uma troca plug-and-play.
+Reverter para int8+Manhattan na v44.
+
+---
+
+## ADR-80: v44 — reverter para int8 + Manhattan (v42 config)
+
+**Contexto**: A v43 mostrou que int16+Euclidiana não é drop-in compatível com
+o threshold 0.6 e K=5. A recalibração exigiria grid search sobre o dataset.
+
+**Decisão**: Reverter integralmente para a configuração da v42:
+- Vector14 int8 (escala 0-127)
+- Distância Manhattan (L1)
+- Magic IVF\x01 (índice compatível)
+- K=5, thr=0.6, nprobe=2
+
+**Arquivos revertidos**: `internal/vector/normalize.go`,
+`internal/vector/normalize_test.go`, `internal/index/index.go`,
+`internal/loader/loader.go`, `internal/index/index_test.go`.
+
+**Hipótese**: Score ~+1075 (consistente com v38/v42).
+
+**Lição**: Mudanças na representação vetorial exigem recalibração. O threshold
+e K foram otimizados para int8+Manhattan ao longo de 40+ versões. Uma migração
+para int16+Euclidiana precisaria de um processo separado de tuning.
