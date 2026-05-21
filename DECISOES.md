@@ -2515,3 +2515,69 @@ FN é proibitivo. O ajuste natural é recalibrar o threshold para o equivalente.
 **Hipótese**: Com threshold ajustado para equivalência, K=7 deve performar igual
 ou melhor que K=5 (v38), pois a decisão é baseada em mais vizinhos (7 vs 5),
 diluindo o efeito de outliers sem alterar o ponto de corte.
+
+---
+
+## ADR-74: v41 — threshold 0.572 vs 0.6: resultado idêntico
+
+**Contexto**: A v41 testou K=7 com threshold 0.572, equivalente ao ponto de corte
+do K=5 thr=0.6. A hipótese era que K=7 com threshold calibrado superaria K=5.
+
+**Resultado oficial (v41, 2026-05-21)**:
+
+| Métrica | v40 (thr=0.6) | v41 (thr=0.572) | Delta |
+|---------|:---:|:---:|:-----:|
+| FP | 336 | 337 | +1 |
+| **FN** | **677** | **679** | **+2** |
+| HTTP errors | 112 | 161 | +49 |
+| p99 | 201ms | 206ms | +5ms |
+| **final_score** | **+922** | **+866** | **−56** |
+
+**Análise**: FP e FN são essencialmente idênticos entre v40 e v41. O threshold
+de 0.6 para 0.572 altera a decisão apenas para transações com exatamente 4
+fraudes entre 7 (4/7=0.5714), mas esse caso é raro o suficiente para não
+aparecer nas métricas. A queda no score veio exclusivamente dos HTTP errors
+(+49, +245 em E).
+
+**Comparação K=5 vs K=7**:
+
+| Config | FP | FN | Score |
+|:-------|:--:|:--:|:-----:|
+| K=5 thr=0.6 (v38) | 733 | 413 | **+1082** |
+| K=7 thr=0.6 (v40) | 336 | 677 | +922 |
+| K=7 thr=0.572 (v41) | 337 | 679 | +866 |
+
+Conclusão: **K=5 é superior a K=7**, independentemente do threshold. Os 2 vizinhos
+extras não adicionam estabilidade — adicionam ruído de vizinhos menos relevantes,
+piorando a discriminação.
+
+**Conclusão**: K=5 thr=0.6 (v38) permanece a melhor configuração. A v42 reverterá
+para essa config e focará em diagnosticar a causa raiz do FP/FN persistente (~2.1%).
+
+---
+
+## ADR-75: v42 — reverter para K=5 thr=0.6 + ferramenta de diagnóstico
+
+**Contexto**: Três versões (v39, v40, v41) tentaram melhorar a detecção via
+nprobe, K e threshold. Nenhuma superou a v38 (K=5, thr=0.6, nprobe=2).
+O FP/FN (~2.1%) parece ser um piso inerente à abordagem atual.
+
+**Decisão**:
+
+1. **Reverter para K=5, thr=0.6, nprobe=2** — config da v38, score +1082.
+
+2. **Criar ferramenta de validação cruzada do parser** (`cmd/diag/main.go`):
+   compara a vetorização do parser JSON manual com `encoding/json` para uma
+   amostra de transações, identificando divergências que possam causar
+   vetorização incorreta.
+
+**Hipótese**: Se o parser manual tem bugs sutis (campos não parseados, valores
+incorretos), corrigi-los pode reduzir o FP/FN. O campeão tem 0 FP/FN, provando
+que a detecção perfeita é possível com os dados disponíveis.
+
+**Arquivos alterados**:
+- `internal/index/index.go`: K=5, nprobe=2
+- `internal/handler/fraud.go`: fraudScore/5.0, thr=0.6
+- `cmd/proxy/main.go`: fraudResponses[6], fraudCount*5
+- `internal/index/index_test.go`: testes K=5
+- `cmd/diag/main.go`: novo — validação cruzada parser

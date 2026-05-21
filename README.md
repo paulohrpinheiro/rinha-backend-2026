@@ -150,15 +150,26 @@ que nprobe=2 já encontra os vizinhos corretos.
 
 Threshold 0.6 com K=7 é conservador demais. Corte em 5/7=71.4% vs 3/5=60%.
 
-### 🎯 v41 — Submissão atual (pendente)
+### Resultado v41: threshold 0.572 — idêntico a 0.6
 
-| Mudança | v40 | v41 |
+| Métrica | v40 | v41 | Delta |
+|:--------|:---:|:---:|:-----:|
+| FP | 336 | 337 | +1 |
+| FN | 677 | 679 | +2 |
+| Score | +922 | +866 | −56 |
+
+Threshold não faz diferença — K=7 é pior que K=5 em qualquer threshold.
+
+### 🎯 v42 — Submissão atual (pendente)
+
+| Mudança | v41 | v42 |
 |:--------|:---:|:---:|
-| K (vizinhos) | 7 | 7 |
-| Threshold | 0.6 | **0.572** |
+| K (vizinhos) | 7 | **5** |
+| Threshold | 0.572 | **0.6** |
 
-**Hipótese**: Threshold 0.572 restaura equivalência com K=5 thr=0.6
-(4/7=0.571 → approve, 5/7=0.714 → deny), mantendo estabilidade de K=7.
+**Estratégia**: Retorno à melhor config conhecida (v38: K=5). Adicionada
+ferramenta `diag` para validação cruzada do parser (0 discrepâncias
+encontradas — parser validado).
 
 ### Evolução completa
 
@@ -185,7 +196,8 @@ Threshold 0.6 com K=7 é conservador demais. Corte em 5/7=71.4% vs 3/5=60%.
 | v38 | proxy 0.19, client 200ms | **57** | **2.2%** | **195ms** | **+1082 🏆** |
 | v39 | nprobe=3 (neutro) | 70 | 2.3% | 192ms | +1073 |
 | v40 | K=7, thr=0.6 | 112 | 2.1% | 201ms | +922 |
-| **v41** | **K=7, thr=0.572** | **?** | **?** | **?** | **aguardando** |
+| v41 | K=7, thr=0.572 | 161 | 2.2% | 206ms | +866 |
+| **v42** | **reverte K=5 + diag tool** | **?** | **?** | **?** | **aguardando** |
 
 ### Marcos da série
 

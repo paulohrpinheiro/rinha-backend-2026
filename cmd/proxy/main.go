@@ -27,17 +27,14 @@ import (
 	"rinha-backend/internal/codec"
 )
 
-// fraudResponses holds the 8 possible JSON responses pre-computed.
-// Zero serialization in the hot path — just index by fraud count (K=7, thr=0.572).
-// 4/7=0.5714 < 0.572 → approved; 5/7=0.7143 ≥ 0.572 → denied
-var fraudResponses = [8][]byte{
+// fraudResponses holds the 6 possible JSON responses pre-computed.
+// Zero serialization in the hot path — just index by fraud count (K=5).
+var fraudResponses = [6][]byte{
 	[]byte(`{"approved":true,"fraud_score":0.0}`),
-	[]byte(`{"approved":true,"fraud_score":0.14285714285714285}`),
-	[]byte(`{"approved":true,"fraud_score":0.2857142857142857}`),
-	[]byte(`{"approved":true,"fraud_score":0.42857142857142855}`),
-	[]byte(`{"approved":true,"fraud_score":0.5714285714285714}`),
-	[]byte(`{"approved":false,"fraud_score":0.7142857142857143}`),
-	[]byte(`{"approved":false,"fraud_score":0.8571428571428571}`),
+	[]byte(`{"approved":true,"fraud_score":0.2}`),
+	[]byte(`{"approved":true,"fraud_score":0.4}`),
+	[]byte(`{"approved":false,"fraud_score":0.6}`),
+	[]byte(`{"approved":false,"fraud_score":0.8}`),
 	[]byte(`{"approved":false,"fraud_score":1.0}`),
 }
 
@@ -201,11 +198,11 @@ func (p *RoundRobinProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	proxyCounters.ResponsesReceived.Add(1)
 
-	fraudCount := int(math.Round(binResp.FraudScore * 7))
+	fraudCount := int(math.Round(binResp.FraudScore * 5))
 	if fraudCount < 0 {
 		fraudCount = 0
-	} else if fraudCount > 7 {
-		fraudCount = 7
+	} else if fraudCount > 5 {
+		fraudCount = 5
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

@@ -1,89 +1,106 @@
-// +build ignore
-
+// Diagnostic tool: validates parser JSON manual against encoding/json.
+//
+// Compares vectorization results for example payloads and reports
+// any discrepancies that could cause incorrect fraud detection.
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"time"
+	"os"
 
-	"rinha-backend/internal/codec"
-	"rinha-backend/internal/index"
-	"rinha-backend/internal/loader"
+	"rinha-backend/internal/model"
+	"rinha-backend/internal/parser"
 	"rinha-backend/internal/vector"
 )
 
+// normalizeFromStdlib parses with encoding/json and returns the vector.
+func normalizeFromStdlib(body []byte, norm *vector.NormalizationConfig) vector.Vector14 {
+	var tx model.TransactionPayload
+	if err := json.Unmarshal(body, &tx); err != nil {
+		panic(fmt.Sprintf("stdlib parse failed: %v", err))
+	}
+
+	// Convert to parser.Payload
+	p := parser.Payload{
+		Amount:             tx.Transaction.Amount,
+		Installments:       tx.Transaction.Installments,
+		RequestedAt:        tx.Transaction.RequestedAt,
+		AvgAmount:          tx.Customer.AvgAmount,
+		TxCount24h:         tx.Customer.TxCount24h,
+		KnownMerchants:     tx.Customer.KnownMerchants,
+		MerchantID:         tx.Merchant.ID,
+		MCC:                tx.Merchant.MCC,
+		MerchantAvgAmount:  tx.Merchant.AvgAmount,
+		IsOnline:           tx.Terminal.IsOnline,
+		CardPresent:        tx.Terminal.CardPresent,
+		KmFromHome:         tx.Terminal.KmFromHome,
+		HasLastTransaction: tx.LastTransaction != nil,
+	}
+	if tx.LastTransaction != nil {
+		p.LastTimestamp = tx.LastTransaction.Timestamp
+		p.LastKmFromCurrent = tx.LastTransaction.KmFromCurrent
+	}
+
+	return vector.Normalize(&p, norm)
+}
+
+// normalizeFromManual parses with the manual JSON parser and returns the vector.
+func normalizeFromManual(body []byte, norm *vector.NormalizationConfig) vector.Vector14 {
+	var p parser.Payload
+	if err := parser.ParseJSON(body, &p); err != nil {
+		panic(fmt.Sprintf("manual parse failed: %v", err))
+	}
+	return vector.Normalize(&p, norm)
+}
+
 func main() {
-	// Load index
-	idxData, err := loader.LoadIndex("resources/index.bin")
+	if len(os.Args) < 2 {
+		fmt.Fprintf(os.Stderr, "Usage: diag <payloads.json>\n")
+		os.Exit(1)
+	}
+
+	payloadsPath := os.Args[1]
+	data, err := os.ReadFile(payloadsPath)
 	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("Loaded %d vectors, %d centroids\n", len(idxData.Vectors), len(idxData.Centroids))
-
-	// Cluster sizes
-	fmt.Println("\nCluster size distribution (top 10 largest):")
-	type clusterInfo struct {
-		id   int
-		size int
-	}
-	largest := make([]clusterInfo, 0, 10)
-	for c := 0; c < len(idxData.Centroids); c++ {
-		start := idxData.Offsets[c]
-		end := idxData.Offsets[c+1]
-		size := end - start
-		if len(largest) < 10 {
-			largest = append(largest, clusterInfo{c, size})
-		} else {
-			// find min
-			minIdx := 0
-			for i := range largest {
-				if largest[i].size < largest[minIdx].size {
-					minIdx = i
-				}
-			}
-			if size > largest[minIdx].size {
-				largest[minIdx] = clusterInfo{c, size}
-			}
-		}
-	}
-	// Sort descending
-	for i := 0; i < len(largest); i++ {
-		for j := i + 1; j < len(largest); j++ {
-			if largest[j].size > largest[i].size {
-				largest[i], largest[j] = largest[j], largest[i]
-			}
-		}
-	}
-	for _, ci := range largest {
-		fmt.Printf("  Cluster %d: %d vectors\n", ci.id, ci.size)
+		fmt.Fprintf(os.Stderr, "Failed to read %s: %v\n", payloadsPath, err)
+		os.Exit(1)
 	}
 
-	// Total vectors sanity
-	sum := 0
-	minSize := 1 << 30
-	maxSize := 0
-	for c := 0; c < len(idxData.Centroids); c++ {
-		size := idxData.Offsets[c+1] - idxData.Offsets[c]
-		sum += size
-		if size < minSize {
-			minSize = size
-		}
-		if size > maxSize {
-			maxSize = size
-		}
+	var payloads []json.RawMessage
+	if err := json.Unmarshal(data, &payloads); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to parse payloads: %v\n", err)
+		os.Exit(1)
 	}
-	fmt.Printf("\nAll clusters: total=%d min=%d max=%d avg=%.1f\n", sum, minSize, maxSize, float64(sum)/float64(len(idxData.Centroids)))
 
-	idx := index.NewIVFIndex(idxData.Vectors, idxData.Labels, idxData.Centroids, idxData.Offsets)
+	// Load normalization config
+	resourcesDir := "resources"
+	if dir := os.Getenv("RESOURCES_DIR"); dir != "" {
+		resourcesDir = dir
+	}
 
-	normModel, err := loader.LoadNormalization("resources/normalization.json")
+	normData, err := os.ReadFile(resourcesDir + "/normalization.json")
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "Failed to read normalization.json: %v\n", err)
+		os.Exit(1)
 	}
-	mccRisk, err := loader.LoadMCCRisk("resources/mcc_risk.json")
+	var normModel model.Normalization
+	if err := json.Unmarshal(normData, &normModel); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to parse normalization.json: %v\n", err)
+		os.Exit(1)
+	}
+
+	mccData, err := os.ReadFile(resourcesDir + "/mcc_risk.json")
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "Failed to read mcc_risk.json: %v\n", err)
+		os.Exit(1)
 	}
+	var mccRisk map[string]float64
+	if err := json.Unmarshal(mccData, &mccRisk); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to parse mcc_risk.json: %v\n", err)
+		os.Exit(1)
+	}
+
 	norm := &vector.NormalizationConfig{
 		MaxAmount:            normModel.MaxAmount,
 		MaxInstallments:      normModel.MaxInstallments,
@@ -95,42 +112,39 @@ func main() {
 		MCCRisk:              mccRisk,
 	}
 
-	payloads := map[string]codec.Payload{
-		"A_card_present": {
-			Amount: 384.88, Installments: 3, RequestedAt: time.Date(2026, 3, 11, 20, 23, 35, 0, time.UTC),
-			AvgAmount: 769.76, TxCount24h: 3,
-			KnownMerchants: []string{"MERC-009", "MERC-001", "MERC-001"},
-			MerchantID: "MERC-001", MCC: "5912", MerchantAvgAmount: 298.95,
-			IsOnline: false, CardPresent: true, KmFromHome: 13.709,
-			HasLastTransaction: true, LastTimestamp: time.Date(2026, 3, 11, 14, 58, 35, 0, time.UTC), LastKmFromCurrent: 18.863,
-		},
-		"B_no_card": {
-			Amount: 2911.41, Installments: 12, RequestedAt: time.Date(2026, 3, 19, 2, 17, 11, 0, time.UTC),
-			AvgAmount: 411.03, TxCount24h: 8,
-			KnownMerchants: []string{"MERC-221", "MERC-010"},
-			MerchantID: "MERC-551", MCC: "6011", MerchantAvgAmount: 712.22,
-			IsOnline: true, CardPresent: false, KmFromHome: 2.18,
-			HasLastTransaction: true, LastTimestamp: time.Date(2026, 3, 18, 23, 51, 5, 0, time.UTC), LastKmFromCurrent: 1.34,
-		},
+	discrepancies := 0
+	matches := 0
+
+	for i, raw := range payloads {
+		body := []byte(raw)
+
+		// Parse with both methods
+		vStd := normalizeFromStdlib(body, norm)
+		vMan := normalizeFromManual(body, norm)
+
+		// Compare
+		if vStd != vMan {
+			discrepancies++
+			fmt.Printf("MISMATCH payload #%d:\n", i)
+			fmt.Printf("  stdlib: %v\n", vStd)
+			fmt.Printf("  manual: %v\n", vMan)
+
+			// Show field-by-field differences
+			for d := 0; d < 14; d++ {
+				if vStd[d] != vMan[d] {
+					fmt.Printf("  dim[%d]: stdlib=%d manual=%d\n", d, vStd[d], vMan[d])
+				}
+			}
+			fmt.Println()
+		} else {
+			matches++
+		}
 	}
 
-	for name, p := range payloads {
-		fmt.Printf("\n=== %s ===\n", name)
-		// Warmup
-		for i := 0; i < 100; i++ {
-			q := vector.Normalize(&p, norm)
-			idx.Search(&q)
-		}
+	fmt.Printf("Results: %d matches, %d mismatches out of %d payloads\n",
+		matches, discrepancies, len(payloads))
 
-		// Benchmark
-		const N = 10000
-		start := time.Now()
-		for i := 0; i < N; i++ {
-			q := vector.Normalize(&p, norm)
-			idx.Search(&q)
-		}
-		elapsed := time.Since(start)
-		avg := elapsed / N
-		fmt.Printf("  Normalize + Search avg: %v (%d ops in %v)\n", avg, N, elapsed)
+	if discrepancies > 0 {
+		os.Exit(1)
 	}
 }

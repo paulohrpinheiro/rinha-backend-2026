@@ -43,7 +43,7 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 	const (
 		nprobe              = 2
 		maxScanPerCluster   = 5000
-		k                   = 7
+		k                   = 5
 	)
 
 	if idx.nClusters == 0 {
@@ -78,8 +78,6 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 		label uint8
 	}
 	topK := [k]neighbor{
-		{dist: math.MaxInt32},
-		{dist: math.MaxInt32},
 		{dist: math.MaxInt32},
 		{dist: math.MaxInt32},
 		{dist: math.MaxInt32},
