@@ -14,15 +14,18 @@ Client -> Proxy -> API #1 e API #2 (round-robin)
 
 | Serviço | CPU | Memória | Função |
 |---------|:---:|:-------:|--------|
-| proxy   | 0.10 | 20 MB | Load balancer round-robin + /ready + /debug/vars + JSON→binário |
-| api-1   | 0.45 | 165 MB | Detecção de fraude (IVF, protocolo binário, /debug/vars) |
-| api-2   | 0.45 | 165 MB | Detecção de fraude (IVF, protocolo binário, /debug/vars) |
+| proxy   | 0.19 | 20 MB | Load balancer round-robin + /ready + /debug/vars |
+| api-1   | 0.405 | 165 MB | Detecção de fraude (IVF, parser JSON manual, /debug/vars) |
+| api-2   | 0.405 | 165 MB | Detecção de fraude (IVF, parser JSON manual, /debug/vars) |
 | Total   | 1.0 | 350 MB | — |
 
-**Protocolo**: O proxy recebe JSON do cliente, faz o parsing, codifica em formato
-binário compacto (~80-130 bytes), e envia para as APIs via Unix socket. As APIs
-leem o binário diretamente (zero alocações de parsing) e respondem com 9 bytes
-binários. O proxy decodifica e serializa a resposta JSON para o cliente.
+**Protocolo**: O proxy recebe JSON do cliente e o encaminha **bruto** (sem parsing)
+para as APIs via Unix socket. As APIs fazem parsing JSON manual byte-a-byte
+(zero alocações, zero reflection) e respondem com 9 bytes binários (codec).
+O proxy decodifica a resposta binária e retorna JSON pré-computado ao cliente.
+
+**Evolução**: v34 removeu o codec binário de ida (proxy↔API), substituindo por
+JSON bruto + parser manual na API — reduziu HTTP errors em 67%.
 
 ---
 
@@ -69,7 +72,8 @@ internal/
   model/types.go       # Tipos: payload, resposta, normalização
   vector/normalize.go  # Vetor 14-dim + quantização int8 + Manhattan
   index/index.go       # IVF Index (Inverted File Index)
-  handler/fraud.go     # Handlers HTTP (/ready, /fraud-score)
+  handler/fraud.go     # Handlers HTTP (/ready, /fraud-score, /debug/vars)
+  parser/json.go       # Parsing JSON manual byte-a-byte (zero alocações)
   loader/loader.go     # Carregamento streaming + clustering IVF + serialização binária do índice
   *_test.go            # Testes unitários e benchmarks
 docs/
@@ -100,119 +104,75 @@ README.md              # Este arquivo
 
 ## Resultados do Teste Oficial (Evolução)
 
-> Última submissão: v27 (commit `df0c7cd`) · Score: **−6000** (regressão vs v26)
-> Docker Hub: `paulohrpinheiro/rinha-proxy:v27` + `rinha-api:v27`
+> Última submissão: **v38** (commit `bc65b27`) · Aguardando resultado
+> Docker Hub: `paulohrpinheiro/rinha-proxy:v38` + `rinha-api:v38`
 
-### Resultado oficial v27
+### 🏆 Melhor resultado: −3503 (v37)
 
 | Componente | Valor | Corte |
 |:-----------|:-----:|:-----:|
-| `score_p99` | **−3000** | p99 = 2002.07ms > 2000ms |
-| `score_det` | **−3000** | failure_rate = 53.88% > 15% |
-| **Final** | **−6000** | Piso absoluto |
+| `score_p99` | **−3000** | p99 = 2001.26ms > 2000ms |
+| `score_det` | **−503** | failure_rate = 5.4% (< 15%) |
+| **Final** | **−3503** | — |
 
-| Métrica | v27 | v26 | Delta |
+| Métrica | v37 | v35 (baseline) | Delta |
 |:--------|:---:|:---:|:-----:|
-| HTTP errors | 10.006 | 5.400 | **+85% ❌** |
-| TP + TN (corretos) | 8.744 | 27.100 | **−68% ❌** |
-| FP + FN (erros) | 211 | 586 | −64% ✅ |
-| Processados (total) | 18.961 | 33.086 | **−43% ❌** |
-| Fantasmas (perdidos) | 35.139 | 21.014 | **+67% ❌** |
-| Precisão | 97.6% | 97.9% | estável |
-| Failure rate | 53.88% | 18.09% | **+198% ❌** |
-| p99 | 2002.07ms | 2001.77ms | estável |
-| Score | −6000 | −6000 | estável |
+| HTTP errors | 1.587 | 1.812 | −12.4% ✅ |
+| TP + TN (corretos) | 44.661 | 47.098 | −5.2% |
+| FP | 609 | 517 | +92 |
+| FN | 354 | 537 | −34% ✅ |
+| Processados (total) | 51.615 | 49.964 | +3.3% ✅ |
+| Failure rate | 5.4% | 5.74% | −0.34pp ✅ |
+| p99 | 2001.26ms | 2000.92ms | +0.34ms |
+| Detection score | −503 | −565 | +62 ✅ |
+| Final score | **−3503** | −3565 | **+62 ✅** |
 
-### Análise da regressão v26→v27
+### 🎯 v38 — Submissão atual (pendente)
 
-O v27 teve **regressão em quase todas as métricas** comparado ao v26.
-Apenas a precisão das detecções (FP/FN) melhorou — mas irrelevante quando
-o throughput caiu 43%.
+| Mudança | v37 | v38 |
+|:--------|:---:|:---:|
+| Proxy CPU | 0.17 | **0.19** |
+| API CPU | 0.415 | **0.405** |
+| Client timeout | 500ms | **200ms** |
+| Server timeouts | 200ms | 200ms |
 
-**Hipóteses para a regressão** (6 mudanças simultâneas, difícil isolar):
+**Hipótese**: Proxy com 0.19 CPU + client timeout 200ms reduz HTTP errors e
+pode empurrar o p99 abaixo de 2000ms. Se romper a barreira, o score salta
+~3700 pontos (fim do corte de −3000 no p99_score).
 
-1. **Timeouts 500ms (eram 100-200ms)**: provável causa principal. Timeouts mais
-   longos significam que requisições problemáticas ocupam slots por 2.5× mais tempo,
-   agravando o cascade sob carga. Com 200ms, uma requisição lenta é cortada rápido;
-   com 500ms, ela segura o slot, bloqueia o semáforo, e causa mais timeouts no proxy.
+### Evolução completa
 
-2. **Proxy 0.10 CPU (era 0.15)**: o proxy perdeu 33% de CPU. Com parsing JSON +
-   encode binário + forward, 0.10 pode ser insuficiente para sustentar 180 req/s.
+| Versão | Mudança chave | HTTP Errs | Failure | p99 | Score |
+|:------:|:-------------|:---------:|:-------:|:---:|:-----:|
+| v10 | TCP, httputil | 13.858 | 100% | 2002ms | −6000 |
+| v16 | codec binário | 52.601 | 97.5% | 1042ms | −3018 |
+| v17 | Unix sockets | 53.370 | 98.9% | **1066ms** | −3028 |
+| v20 | proxy custom, semaf 16 | 50.368 | 96.4% | 501ms | −2700 |
+| v21 | semáforo removido | 49.706 | 92.2% | 2002ms | −6000 |
+| v24 | DecodeBytes fix | 44.800 | 83.1% | 2002ms | −6000 |
+| v26 | K-means + nprobe=3 | 5.400 | 18.1% | 2002ms | −6000 |
+| v27 | diag, timeouts 500ms | 10.006 | 53.9% | 2002ms | −6000 |
+| v28 | reverte timeouts 200ms | 12.321 | 80.0% | 2002ms | −6000 |
+| v29 | proxy 0.15 CPU | 9.840 | 46.8% | 2002ms | −6000 |
+| v30 | semáforo 1024 | 5.550 | 16.0% | 2001ms | −6000 |
+| v31 | nprobe=3 | 6.873 | 29.3% | 2002ms | −6000 |
+| v32 | nprobe=2, timeout 200ms | 8.951 | 29.7% | 2002ms | −6000 |
+| v33 | GOMEMLIMIT=60MiB | — | — | — | não submetido |
+| v34 | parser JSON manual | 3.783 | 36.6% | 2002ms | −6000 |
+| v35 | parser keyLen fix | 1.812 | 5.7% | 2001ms | **−3565 🎉** |
+| v36 | timeouts 100ms ❌ | 7.709 | 17.7% | 2001ms | −6000 |
+| v37 | proxy 0.17 CPU | **1.587** | **5.4%** | 2001ms | **−3503 🏆** |
+| **v38** | **proxy 0.19, client 200ms** | **?** | **?** | **?** | **aguardando** |
 
-3. **Semáforo 256 (era 1024)**: mais 503s sob rajadas. Embora 256 seja suficiente
-   em regime (~25 slots), rajadas do k6 podem estourar e rejeitar requisições.
+### Marcos da série
 
-4. **Proxy client timeout 800ms (era 500ms)**: combinado com timeouts internos de
-   500ms, o proxy espera mais tempo por APIs sobrecarregadas, acumulando goroutines.
-
-5. **nprobe=2 (era 3)**: provavelmente NÃO é o culpado — a precisão melhorou e
-   a latência de busca caiu. Mas a perda de recall pode ter aumentado search_errors.
-
-**Lição principal**: otimizações locais não se traduzem em melhoria sistêmica
-sob carga sustentada (180 req/s × 5 min). O benchmark local com `ab` (rajadas
-curtas) não reproduz o padrão de ramp-up do k6.
-
-### Benchmark local v27 (pré-submissão)
-
-| Carga | Concorrência | Req/s | p99 | Falhas |
-|:------|:-----------:|:-----:|:---:|:------:|
-| 2.000 | 50 | 570–640 | 203–298ms | **0** |
-| 10.000 | 100 | 560–613 | 398–420ms | **0** |
-
-⚠️ O benchmark local NÃO previu a regressão. O `ab` com 50-100 concorrentes
-não reproduz o padrão de carga sustentada do k6 (ramp-up + 180 req/s constante
-por 5 minutos).
-
-### Evolução completa (resultados oficiais)
-
-| Versão | Mudança chave | Erros HTTP | Detectados | p99 | Score |
-|:------|:-------------|:----------:|:----------:|:---:|:-----:|
-| v10 | TCP, httputil, sem timeouts | 13.858 | 0 | 2002ms | −6000 |
-| v16 | codec binário | 52.601 | 1.370 | 1042ms | −3018 |
-| v17 | Unix sockets | 53.370 | 599 | **1066ms** | −3028 |
-| v20 | proxy custom, semáforo 16 (503) | 50.368 | 3.691 | 501ms | −2700 |
-| v21 | semáforo removido | 49.706 | 326 | 2002ms | −6000 |
-| v24 | DecodeBytes fix | 44.800 | 329 | 2002ms | −6000 |
-| **v26** | **K-means corrigido + nprobe=3** | 5.400 | **27.686** | 2002ms | −6000 |
-| **v27** | **diag + CPU 0.10 + timeouts 500ms + semaf 256 + nprobe=2** | **10.006** | **8.955** | 2002ms | **−6000** |
-| **v28** | **reverte timeouts 200ms (1 diff)** | **12.321** | **3.173** | 2002ms | **−6000** |
-| **v29** | **proxy 0.15 CPU (config v26)** | **9.840** | **11.765** | 2002ms | **−6000** |
-| **v30** | **semáforo 1024 (1 diff)** | **5.550** | **33.772** | **2001ms** | **−6000** |
-| **v31** | **nprobe=3 (recall)** | **6.873** | **17.806** | 2002ms | **−6000** |
-| **v32** | **nprobe=2 + client timeout 200ms** | **8.951** | **22.781** | 2002ms | **−6000** |
-| **v33** | **GOMEMLIMIT=60MiB (estrutural)** | — | — | — | **não submetido** |
-| **v34** | **parser JSON manual + proxy forward bruto** | **3.783** | **35.788** | 2002ms | **−6000** |
-| **v35** | **parser corrigido (keyLen fix)** | **1.812** | **48.152** | **2001ms** | **−3564 🎉** |
-
-### 🎉 PRIMEIRO SCORE NÃO-PISO: −3564 (v35)
-
-| Métrica | v30 (codec) | v35 (parser) | Delta |
-|---------|:----------:|:----------:|:-----:|
-| HTTP errors | 5.550 | 1.812 | −67% |
-| Processados | 39.322 | 49.964 | +27% |
-| Corretos (TP+TN) | 33.052 | 47.098 | +42% |
-| Failure rate | 15.95% | **5.74%** | −10pp |
-| p99 | 2001.42ms | 2000.92ms | −0.5ms |
-| Detection score | −3000 (cut) | **−564 (no cut)** | +2436 |
-| Final score | −6000 | **−3564** | **+2436** |
-
-O parser JSON manual + proxy forwardando JSON bruto é MUITO superior ao codec binário.
-Failure rate caiu de 15.95% para 5.74% — detection_score NÃO aciona mais o corte.
-Resta apenas o p99 a **0.92ms** do corte. Se baixar para <2000ms, score = −564.
-
-| Métrica | v26 | v27 | v28 | v29 | v30 |
-|---------|:---:|:---:|:---:|:---:|:---:|
-| Proxy CPU | 0.15 | 0.10 | 0.10 | 0.15 | 0.15 |
-| Semáforo | 1024 | 256 | 256 | 256 | **1024** |
-| nprobe | 3 | 2 | 2 | 2 | 2 |
-| Processados | 33.086 | 18.961 | 15.494 | 21.605 | **39.322** |
-| Failure rate | 18.09% | 53.88% | 79.99% | 46.76% | **15.95%** |
-| p99 | 2002ms | 2002ms | 2002ms | 2002ms | 2001ms |
-
-O v30 é o **melhor resultado da série**: 39.3k processados (+19% vs v26).
-Failure rate = 15.95% — a **0.95pp** de sair do corte de −3000.
-p99 = 2001.42ms — a **1.42ms** do corte.
-v31 (nprobe=3) regrediu para 24.7k processados (-37% vs v30), confirmando que nprobe=2 é superior sob carga. Config ideal: proxy 0.15, semáforo 1024, nprobe=2.
+| Marco | Versão | Detalhe |
+|:------|:------:|:--------|
+| Primeiro p99 < 2000ms | v16/v17 | 1042ms/1066ms com codec binário |
+| Primeiro score > −6000 | v20 | −2700 com proxy custom |
+| Menos HTTP errors | v37 | 1.587 (−67% vs v30) |
+| Melhor score | v37 | −3503 |
+| Melhor detection | v35/v37 | sem corte (−565 / −503) |
 
 ### Lições Aprendidas
 
@@ -232,6 +192,10 @@ v31 (nprobe=3) regrediu para 24.7k processados (-37% vs v30), confirmando que np
 | 🔬 **Diagnóstico é tão importante quanto otimização** | Sem contadores (ADR-46), as 21k requisições "fantasmas" do v26 eram invisíveis. Adicionar `/debug/vars` em proxy e APIs revelou exatamente onde cada requisição estava. |
 | 🎛️ **Timeouts muito curtos causam falsos timeouts** | Com GOMAXPROCS=1 e 180 req/s, uma goroutine pode esperar >100ms pelo scheduler. Timeout de 100ms dispara antes do processamento começar. |
 | ⚖️ **Capacidade do semáforo é uma curva em U** | 16 slots (v20): muitos 503. 128 bloqueante (v24): cascade. 1024 (v26): scheduler thrashing. 256 (v27): equilíbrio. |
+| 📝 **Parser JSON manual supera codec binário** | v34 removeu o codec de ida e passou a forwardar JSON bruto. v35 corrigiu bugs de keyLen. Resultado: HTTP errors −67%, throughput +27%, detection_score saiu do corte. |
+| ⏱️ **Timeout de 100ms é contraproducente** | v36 tentou baixar p99 com timeouts 100ms. Resultado: +325% HTTP errors, falhou o detection_score. Com GOMAXPROCS=1, scheduling jitter >100ms é comum. |
+| 📈 **Mais CPU no proxy melhora consistentemente** | v35→v37: proxy 0.15→0.17, HTTP errors −12.4%, score +61. v38 tenta proxy 0.19. O proxy é o gargalo principal. |
+| 🎯 **Client timeout deve ser consistente com server timeout** | Proxy client tinha timeout 500ms mas server HTTP cortava em 200ms. v38 alinha ambos em 200ms. |
 
 As decisões arquiteturais estão documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)**.
 
@@ -252,10 +216,11 @@ Em desenvolvimento local (sem Docker), a API faz o carregamento completo do `ref
 como fallback.
 
 ### 2. Recebimento
-`POST /fraud-score` recebe JSON com dados da transação. O proxy faz o parsing
-JSON e codifica para um formato binário compacto (~80-130 bytes) antes de
-enviar para as APIs via Unix socket. As APIs leem o binário diretamente,
-sem `json.Unmarshal` — zero alocações de parsing.
+`POST /fraud-score` recebe JSON com dados da transação. O proxy faz `io.Copy`
+do body e encaminha o JSON **bruto** para as APIs via Unix socket (zero parsing
+no proxy). As APIs fazem parsing JSON manual byte-a-byte com `parser.ParseJSON()`,
+resolvendo campos por tamanho da chave — zero `json.Unmarshal`, zero reflection,
+zero alocações de string.
 
 ### 3. Vetorização (14 dimensões)
 Cada campo é normalizado para [0,1] seguindo as fórmulas em [REGRAS_DE_DETECCAO.md](./docs/REGRAS_DE_DETECCAO.md) e quantizado para int8 (0-127), reduzindo 4x o uso de memória.
@@ -462,6 +427,20 @@ Documentadas em **[docs/DECISOES.md](./docs/DECISOES.md)** — arquivo de contex
 | 50 | nprobe=2 | Redução de 30% na latência de busca (130→90µs) |
 | 51 | Warmup expandido (64 searches) | Cobertura ampliada de clusters antes do tráfego real |
 | 52 | Otimização codec adiada | `bytes.Buffer` não expõe API para buffer reuse seguro |
+| 53 | Warmup inline (handler.Warmup) | 64 buscas antes de aceitar tráfego |
+| 54 | Increase proxy CPU (v29) | Proxy 0.15 CPU (era 0.10) — era o gargalo |
+| 55 | Timeout revert (v28→v29) | Retorno a 200ms após regressão com 500ms |
+| 56 | Semáforo 1024 (v30) | Retorno à capacidade folgada do v26 |
+| 57 | nprobe=3 regression (v31) | nprobe=3 piorou throughput em 37% vs v30 |
+| 59 | nprobe=2 + client timeout 200ms (v32) | Config estável: proxy 0.15, semáforo 1024 |
+| 60 | GOMEMLIMIT=60MiB (v33) | Memória mais restrita para reduzir GC pressure |
+| 61 | Parser JSON manual (v34) | Proxy forwarda JSON bruto, API faz parsing byte-a-byte |
+| 62 | Correção keyLen (v35) | tx_count_24h=12 e requested_at=12 corrigidos |
+| 63 | v35 — primeiro score não-piso | −3564, detection_score sem corte |
+| 64 | Timeouts 100ms (v36) | Tentativa de baixar p99 — regrediu para −6000 |
+| 65 | Reverte timeouts + proxy 0.17 (v37) | Melhor score da série: −3503 |
+| 66 | Análise v37 | Proxy CPU reduz HTTP errors mas p99 estagnado |
+| 67 | Proxy 0.19 + client 200ms (v38) | Estratégia atual — aguardando resultado |
 
 ---
 
