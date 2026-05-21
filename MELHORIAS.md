@@ -203,7 +203,8 @@ Aquece caches de CPU, resolve page faults, compila hot paths.
 | v35 | correção keyLen | **1.812** | 5.7% | 2001ms | **−3565** |
 | v36 | timeouts 100ms | 7.709 | 17.7% | 2001ms | −6000 |
 | v37 | timeouts 200ms + proxy 0.17 | 1.587 | 5.4% | 2001ms | −3503 |
-| **v38** | **proxy 0.19 + client 200ms** | **?** | **?** | **?** | **?** |
+| v38 | proxy 0.19 + client 200ms | **57** | **2.2%** | **195ms** | **+1082 🏆** |
+| **v39** | **nprobe=3** | **?** | **?** | **?** | **?** |
 
 ### Análise de tendência
 
@@ -222,9 +223,14 @@ Aquece caches de CPU, resolve page faults, compila hot paths.
    acima do corte de 2000ms. A latência de processamento real é <1μs — o p99 é
    dominado por scheduling/queueing delays do kernel e do runtime Go.
 
-5. **Próximo desafio**: Romper a barreira dos 2000ms. Com p99 < 2000ms, o p99_score
-   salta de −3000 para ~+700, adicionando ~3700 pontos ao score final. Isso
-   transformaria −3503 em ~+200 (detection_score ainda negativo).
+5. **v38 — Rompeu a barreira**: Proxy 0.19 CPU + client timeout 200ms derrubou
+   o p99 de 2001ms para 195ms (−90%). HTTP errors colapsaram 96% (1587→57).
+   Primeiro score positivo da série (+1082). O detection_score também ficou
+   positivo (+373).
+
+6. **Próximo desafio**: Melhorar a detecção. Com p99=195ms, há folga para
+   aumentar nprobe=3 e melhorar recall sem impacto relevante na latência.
+   O gap para o campeão (6000) está 82% na detecção (FP+FN=1146 vs 0).
 
 ### Lições aprendidas
 
@@ -236,3 +242,7 @@ Aquece caches de CPU, resolve page faults, compila hot paths.
   responsável pelo salto de −6000 para −3565.
 - **nprobe=2 é suficiente** — nprobe=3 (v31) piorou HTTP errors (+24%) sem melhorar
   significativamente a detecção.
+- **Client timeout deve ser ≤ server timeout** — Proxy client 500ms com server 200ms
+  causava espera fantasma. Alinhar ambos em 200ms (v38) foi crucial para o salto.
+- **Depois de romper a barreira do p99, o foco muda para detecção** — Com p99=195ms,
+  a folga de latência permite investir em recall (nprobe=3) sem medo de degradação.

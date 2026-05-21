@@ -104,41 +104,41 @@ README.md              # Este arquivo
 
 ## Resultados do Teste Oficial (Evolução)
 
-> Última submissão: **v38** (commit `bc65b27`) · Aguardando resultado
-> Docker Hub: `paulohrpinheiro/rinha-proxy:v38` + `rinha-api:v38`
+> Última submissão: **v39** (commit pendente) · Aguardando resultado
+> Docker Hub: `paulohrpinheiro/rinha-proxy:v39` + `rinha-api:v39`
 
-### 🏆 Melhor resultado: −3503 (v37)
+### 🏆 Melhor resultado: +1082 (v38) 🎉 PRIMEIRO SCORE POSITIVO
 
 | Componente | Valor | Corte |
 |:-----------|:-----:|:-----:|
-| `score_p99` | **−3000** | p99 = 2001.26ms > 2000ms |
-| `score_det` | **−503** | failure_rate = 5.4% (< 15%) |
-| **Final** | **−3503** | — |
+| `score_p99` | **+709** | p99 = 195.23ms < 2000ms ✅ |
+| `score_det` | **+373** | failure_rate = 2.23% (< 15%) ✅ |
+| **Final** | **+1082** | Primeiro score positivo! 🎉 |
 
-| Métrica | v37 | v35 (baseline) | Delta |
+| Métrica | v38 | v37 (baseline) | Delta |
 |:--------|:---:|:---:|:-----:|
-| HTTP errors | 1.587 | 1.812 | −12.4% ✅ |
-| TP + TN (corretos) | 44.661 | 47.098 | −5.2% |
-| FP | 609 | 517 | +92 |
-| FN | 354 | 537 | −34% ✅ |
-| Processados (total) | 51.615 | 49.964 | +3.3% ✅ |
-| Failure rate | 5.4% | 5.74% | −0.34pp ✅ |
-| p99 | 2001.26ms | 2000.92ms | +0.34ms |
-| Detection score | −503 | −565 | +62 ✅ |
-| Final score | **−3503** | −3565 | **+62 ✅** |
+| HTTP errors | 57 | 1.587 | −96.4% ✅ |
+| TP + TN (corretos) | 52.798 | 44.661 | +18.2% ✅ |
+| FP | 733 | 609 | +124 |
+| FN | 413 | 354 | +59 |
+| Processados (total) | 54.001 | 47.211 | +14.4% ✅ |
+| Failure rate | 2.23% | 5.4% | −3.17pp ✅ |
+| **p99** | **195.23ms** | 2001.26ms | **−90.2% ✅** |
+| Detection score | **+373** | −503 | +876 ✅ |
+| Final score | **+1082** | −3503 | **+4585 ✅** |
 
-### 🎯 v38 — Submissão atual (pendente)
+### 🎯 v39 — Submissão atual (pendente)
 
-| Mudança | v37 | v38 |
+| Mudança | v38 | v39 |
 |:--------|:---:|:---:|
-| Proxy CPU | 0.17 | **0.19** |
-| API CPU | 0.415 | **0.405** |
-| Client timeout | 500ms | **200ms** |
-| Server timeouts | 200ms | 200ms |
+| nprobe | 2 | **3** |
+| Proxy CPU | 0.19 | 0.19 |
+| API CPU | 0.405 | 0.405 |
+| Timeouts | 200ms | 200ms |
 
-**Hipótese**: Proxy com 0.19 CPU + client timeout 200ms reduz HTTP errors e
-pode empurrar o p99 abaixo de 2000ms. Se romper a barreira, o score salta
-~3700 pontos (fim do corte de −3000 no p99_score).
+**Hipótese**: Com p99=195ms (folga de latência), aumentar nprobe para 3 melhora
+o recall (reduz FN e FP) ao custo de ~40μs extras por busca — irrelevante.
+O detection_score pode subir de +373 para >+800.
 
 ### Evolução completa
 
@@ -161,8 +161,9 @@ pode empurrar o p99 abaixo de 2000ms. Se romper a barreira, o score salta
 | v34 | parser JSON manual | 3.783 | 36.6% | 2002ms | −6000 |
 | v35 | parser keyLen fix | 1.812 | 5.7% | 2001ms | **−3565 🎉** |
 | v36 | timeouts 100ms ❌ | 7.709 | 17.7% | 2001ms | −6000 |
-| v37 | proxy 0.17 CPU | **1.587** | **5.4%** | 2001ms | **−3503 🏆** |
-| **v38** | **proxy 0.19, client 200ms** | **?** | **?** | **?** | **aguardando** |
+| v37 | proxy 0.17 CPU | **1.587** | **5.4%** | 2001ms | **−3503** |
+| v38 | proxy 0.19, client 200ms | **57** | **2.2%** | **195ms** | **+1082 🏆** |
+| **v39** | **nprobe=3** | **?** | **?** | **?** | **aguardando** |
 
 ### Marcos da série
 
@@ -170,9 +171,11 @@ pode empurrar o p99 abaixo de 2000ms. Se romper a barreira, o score salta
 |:------|:------:|:--------|
 | Primeiro p99 < 2000ms | v16/v17 | 1042ms/1066ms com codec binário |
 | Primeiro score > −6000 | v20 | −2700 com proxy custom |
-| Menos HTTP errors | v37 | 1.587 (−67% vs v30) |
-| Melhor score | v37 | −3503 |
-| Melhor detection | v35/v37 | sem corte (−565 / −503) |
+| Detection sem corte | v35 | −565 (failure < 15%) |
+| **Primeiro score positivo** | **v38** | **+1082** 🎉 |
+| Menos HTTP errors | v38 | 57 (−96% vs v37) |
+| Melhor score | v38 | +1082 |
+| Melhor p99 | v38 | 195ms (−90% vs v37) |
 
 ### Lições Aprendidas
 
@@ -226,10 +229,10 @@ zero alocações de string.
 Cada campo é normalizado para [0,1] seguindo as fórmulas em [REGRAS_DE_DETECCAO.md](./docs/REGRAS_DE_DETECCAO.md) e quantizado para int8 (0-127), reduzindo 4x o uso de memória.
 
 ### 4. Busca Vetorial (IVF Index)
-- Encontra os 2 centroides mais próximos (nprobe=2) entre 1.000 centroides
+- Encontra os 3 centroides mais próximos (nprobe=3) entre 1.000 centroides
 - Busca os 5 vizinhos mais próximos dentro desses clusters (até 5.000 vetores por cluster)
 - Distribuição balanceada: clusters de 914 a 6.109 vetores (K-means corrigido, ADR-45)
-- Latência de busca: ~90µs (nprobe=2) vs ~130µs (nprobe=3)
+- Latência de busca: ~130µs (nprobe=3)
 - Usa distância Manhattan com loop unrolled
 
 ### 5. Decisão
@@ -286,7 +289,7 @@ Baixe do [repositório oficial da Rinha](https://github.com/zanfranceschi/rinha-
 |----------|:-----:|:---------:|
 | ManhattanDistance (14 dims) | ~14 ns | 0 B/op |
 | Normalize (payload -> vetor) | ~100 ns | 0 B/op |
-| IVF Search (Normalize + Search, 2 clusters) | ~90 µs | 0 B/op |
+| IVF Search (Normalize + Search, 3 clusters) | ~130 µs | 0 B/op |
 
 ### Benchmark de carga realista
 

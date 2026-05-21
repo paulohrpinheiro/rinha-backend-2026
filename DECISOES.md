@@ -2281,3 +2281,107 @@ de 2000ms.
 **Hipótese**: O proxy com 0.19 CPU + client timeout 200ms reduzirá HTTP errors
 abaixo de 1500 e poderá baixar o p99 para <2000ms (ganho de ~3700 pontos se
 escapar do corte).
+
+---
+
+## ADR-68: v38 — PRIMEIRO SCORE POSITIVO (+1082), p99 rompe barreira
+
+**Contexto**: O v38 (commit 50c1d3f) foi submetido com proxy 0.19 CPU + client
+timeout 200ms. A hipótese era que mais CPU no proxy + timeout consistente
+reduziria HTTP errors e poderia baixar o p99 abaixo de 2000ms.
+
+**Resultado oficial (v38, 2026-05-21)**:
+
+### Comparação v37 → v38
+
+| Métrica | v37 | v38 | Delta |
+|---------|:----:|:----:|:-----:|
+| HTTP errors | 1.587 | **57** | **−1530 (−96.4%)** |
+| Processados | 47.211 | 54.001 | +6.790 (+14.4%) |
+| Failure rate | 5.4% | **2.23%** | −3.17pp |
+| FP | 609 | 733 | +124 |
+| FN | 354 | 413 | +59 |
+| TP + TN | 44.661 | 52.798 | +8.137 (+18.2%) |
+| E (weighted) | 9.606 | 2.257 | −7.349 (−76.5%) |
+| ε | 0.2035 | 0.0418 | −0.1617 |
+| **p99** | **2001.26ms** | **195.23ms** | **−1806ms (−90.2%)** |
+| p99_score | −3000 (cut) | **+709.45** | +3.709 |
+| rate_component | +691.5 | +1.378.87 | +687.4 |
+| absolute_penalty | −1.194.78 | −1.006.12 | +188.7 |
+| detection_score | −503.28 | **+372.75** | +876.0 |
+| **final_score** | **−3.503** | **+1.082** | **+4.585** |
+
+### Análise
+
+1. **p99 ROMPEU a barreira dos 2000ms** — caiu de 2001ms para 195ms, uma redução
+   de 90%. A combinação proxy 0.19 CPU + client timeout 200ms eliminou o
+   estrangulamento que mantinha o p99 colado no limite por 10 versões.
+
+2. **HTTP errors colapsaram 96.4%** — de 1.587 para 57. Com mais CPU, o proxy
+   drena a fila de entrada com folga. Com client timeout 200ms (alinhado ao
+   server timeout), não há espera desperdiçada.
+
+3. **Score saltou 4.585 pontos** — de −3.503 para +1.082. É o primeiro score
+   positivo da série. Três fatores: p99_score (+3.709), rate_component (+687),
+   absolute_penalty (+189).
+
+4. **FP e FN pioraram** — FP +124, FN +59. Com muito mais requisições processadas
+   (54.001 vs 47.211), o número absoluto de erros de detecção aumentou. A taxa
+   FP+FN/processados subiu de 1.87% para 2.12%.
+
+5. **Detection score positivo pela primeira vez** — +372.75. O rate_component
+   (baseado em ε) subiu para 1.378, superando o absolute_penalty (−1.006).
+
+### O que ainda separa do campeão (score 6000)
+
+| Componente | v38 | Campeão (MXLange) | Gap |
+|:-----------|:---:|:---:|:----:|
+| p99 | 195ms | 0.98ms | 199× |
+| p99_score | 709 | 3.000 | 2.291 |
+| FP + FN | 1.146 | 0 | 1.146 |
+| HTTP errors | 57 | 0 | 57 |
+| detection_score | 373 | 3.000 | 2.627 |
+| **final_score** | **1.082** | **6.000** | **4.918** |
+
+### Conclusão
+
+A estratégia de dar mais CPU ao proxy funcionou além do esperado. O p99 rompeu
+a barreira com folga (195ms — 10× abaixo do corte). O detection_score ficou
+positivo pela primeira vez. Agora o maior gap é a **qualidade da detecção**
+(FP+FN=1.146 vs 0 do campeão) e a **latência absoluta** (195ms vs 0.98ms).
+
+### Estratégia para v39
+
+Com p99 em 195ms, temos enorme folga de latência. O custo de processamento
+adicional é diluído. A v39 aumentará nprobe de 2 para 3 para melhorar o recall
+(reduzir FN), ao custo de ~40μs extras por busca — irrelevante com 195ms de p99.
+
+---
+
+## ADR-69: v39 — nprobe=3 para melhorar detecção (recall)
+
+**Contexto**: Com o p99 em 195ms (v38), a latência deixou de ser o gargalo
+principal. O detection_score (+373) está 2.627 pontos abaixo do campeão,
+principalmente devido a FP (733) e FN (413).
+
+**Decisão**: Aumentar nprobe de 2 para 3 no IVF Index Search.
+
+- **nprobe=2**: busca nos 2 centroides mais próximos, varre até 10.000 vetores
+  (2 × 5.000). Latência ~90μs. Recall ~95-97%.
+- **nprobe=3**: busca nos 3 centroides mais próximos, varre até 15.000 vetores
+  (3 × 5.000). Latência ~130μs. Recall >98%.
+
+O custo adicional de 40μs por busca é irrelevante com p99 de 195ms (0.02% da
+latência total). O ganho potencial em recall pode reduzir FN e FP
+significativamente.
+
+**Arquivos alterados**: `internal/index/index.go` (nprobe: 2→3, nearest array: 2→3).
+
+**Hipótese**: nprobe=3 reduzirá FN (melhor recall) e possivelmente FP, com
+impacto mínimo no p99 (<+1ms). O detection_score pode subir de +373 para >+800.
+
+**Nota**: v31 (nprobe=3) foi testada antes do parser JSON manual (v34) e
+regrediu o throughput em 37%. Mas naquele cenário o sistema estava no limite
+(p99=2002ms, failure=16%). Com a v38, o sistema tem enorme folga (p99=195ms,
+failure=2.2%), então o custo adicional do nprobe=3 deve ser absorvido sem
+degradação.
