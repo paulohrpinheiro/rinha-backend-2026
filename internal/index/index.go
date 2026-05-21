@@ -41,8 +41,9 @@ func NewIVFIndex(vectors []vector.Vector14, labels []uint8, centroids []vector.V
 // cluster is pathologically large, which happens only with a broken index.
 func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) {
 	const (
-		nprobe              = 3
+		nprobe              = 2
 		maxScanPerCluster   = 5000
+		k                   = 7
 	)
 
 	if idx.nClusters == 0 {
@@ -55,7 +56,6 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 		dist int32
 	}
 	nearest := [nprobe]centroidDist{
-		{dist: math.MaxInt32},
 		{dist: math.MaxInt32},
 		{dist: math.MaxInt32},
 	}
@@ -72,12 +72,14 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 		}
 	}
 
-	// 2. Search top-5 nearest neighbors within the candidate clusters
+	// 2. Search top-k nearest neighbors within the candidate clusters
 	type neighbor struct {
 		dist  int32
 		label uint8
 	}
-	top5 := [5]neighbor{
+	topK := [k]neighbor{
+		{dist: math.MaxInt32},
+		{dist: math.MaxInt32},
 		{dist: math.MaxInt32},
 		{dist: math.MaxInt32},
 		{dist: math.MaxInt32},
@@ -102,20 +104,20 @@ func (idx *IVFIndex) Search(query *vector.Vector14) (fraudCount int, err error) 
 		for i := start; i < stop; i++ {
 			dist := vector.ManhattanDistance(query, &idx.Vectors[i])
 
-			if dist < top5[4].dist {
-				pos := 4
-				for pos > 0 && dist < top5[pos-1].dist {
-					top5[pos] = top5[pos-1]
+			if dist < topK[k-1].dist {
+				pos := k - 1
+				for pos > 0 && dist < topK[pos-1].dist {
+					topK[pos] = topK[pos-1]
 					pos--
 				}
-				top5[pos] = neighbor{dist: dist, label: idx.Labels[i]}
+				topK[pos] = neighbor{dist: dist, label: idx.Labels[i]}
 			}
 		}
 	}
 
 	// 3. Count frauds (label == 1)
 	fraudCount = 0
-	for _, n := range top5 {
+	for _, n := range topK {
 		if n.label == 1 {
 			fraudCount++
 		}

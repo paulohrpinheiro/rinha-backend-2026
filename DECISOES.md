@@ -2385,3 +2385,71 @@ regrediu o throughput em 37%. Mas naquele cenário o sistema estava no limite
 (p99=2002ms, failure=16%). Com a v38, o sistema tem enorme folga (p99=195ms,
 failure=2.2%), então o custo adicional do nprobe=3 deve ser absorvido sem
 degradação.
+
+---
+
+## ADR-70: v39 — nprobe=3 NÃO melhorou detecção (resultado neutro)
+
+**Contexto**: O v39 testou nprobe=3 com a hipótese de que mais clusters melhorariam
+o recall (reduziriam FN). O resultado mostrou que a hipótese estava errada.
+
+**Resultado oficial (v39, 2026-05-21)**:
+
+| Métrica | v38 (nprobe=2) | v39 (nprobe=3) | Delta |
+|---------|:---:|:---:|:-----:|
+| HTTP errors | 57 | 70 | +13 |
+| FP | 733 | 732 | −1 |
+| **FN** | **413** | **413** | **0** |
+| p99 | 195.23ms | 192.05ms | −3.18ms |
+| p99_score | 709.45 | 716.58 | +7.13 |
+| detection_score | +372.75 | +356.69 | −16.06 |
+| **final_score** | **+1082** | **+1073** | **−9** |
+
+**Análise**: FN ficou **idêntico** (413 em ambas). FP variou 1 (ruído
+estatístico). nprobe=3 varre 50% mais vetores (15.000 vs 10.000) sem nenhum
+ganho de recall. Isso prova que:
+
+1. **nprobe=2 já encontra os vizinhos corretos** — adicionar um terceiro
+   cluster não traz novos vizinhos mais próximos.
+2. **Os 413 FN não são causados por recall insuficiente** — mesmo com
+   nprobe=3 varrendo 15.000 vetores, os mesmos 5 vizinhos são encontrados.
+3. **O problema está em outro lugar**: parser, vetorização, quantização int8,
+   métrica Manhattan, ou limitação inerente do KNN=5 com threshold 0.6.
+
+**Conclusão**: nprobe=2 é o ponto ótimo. Reverter para nprobe=2 na v40.
+
+**Estratégia para v40**: aumentar K de 5 para 7 vizinhos. Com K=5, cada vizinho
+tem peso de 20% na decisão — um outlier pode inverter o resultado. Com K=7, o
+peso cai para ~14%, reduzindo sensibilidade a outliers e potencialmente
+reduzindo FP e FN.
+
+---
+
+## ADR-71: v40 — K=7 vizinhos + reverter nprobe=2
+
+**Contexto**: Com a confirmação de que nprobe=3 não melhora recall (ADR-70), o
+foco muda para o algoritmo de decisão. K=5 vizinhos com threshold 0.6 significa
+que a decisão é binária baseada em apenas 5 referências — cada uma com peso de
+20%. Um único vizinho outlier pode inverter o resultado.
+
+**Decisão**:
+
+1. **K = 7 vizinhos** (era 5): A decisão `fraudScore = fraudCount / 7` dilui o
+   peso de cada vizinho de 20% para ~14%. Com threshold 0.6 mantido, a decisão
+   efetiva fica mais conservadora: 5+ fraudes = deny (5/7=71.4%), 4 fraudes =
+   approve (4/7=57.1%). Antes: 3+ fraudes = deny (3/5=60%).
+
+2. **nprobe = 2** (reverte de 3): Confirmado que nprobe=3 não traz ganho de
+   recall (ADR-70). Voltar para nprobe=2 reduz latência em ~40μs.
+
+3. **maxScanPerCluster = 5000 mantido**: Com K=7, o top-7 é extraído dos
+   mesmos 10.000 vetores candidatos.
+
+**Arquivos alterados**:
+- `internal/index/index.go`: K=7 (top5→top7), nprobe=2
+- `internal/handler/fraud.go`: fraudScore = fraudCount/7.0
+
+**Hipótese**: K=7 reduz sensibilidade a outliers, podendo reduzir tanto FP
+quanto FN. O threshold efetivo mais conservador (71.4% vs 60%) deve reduzir
+FP (menos falsas acusações), mas pode aumentar FN. O efeito líquido depende
+da distribuição dos vizinhos.

@@ -204,7 +204,8 @@ Aquece caches de CPU, resolve page faults, compila hot paths.
 | v36 | timeouts 100ms | 7.709 | 17.7% | 2001ms | −6000 |
 | v37 | timeouts 200ms + proxy 0.17 | 1.587 | 5.4% | 2001ms | −3503 |
 | v38 | proxy 0.19 + client 200ms | **57** | **2.2%** | **195ms** | **+1082 🏆** |
-| **v39** | **nprobe=3** | **?** | **?** | **?** | **?** |
+| v39 | nprobe=3 (neutro) | 70 | 2.3% | 192ms | +1073 |
+| **v40** | **K=7 + nprobe=2** | **?** | **?** | **?** | **?** |
 
 ### Análise de tendência
 
@@ -228,9 +229,16 @@ Aquece caches de CPU, resolve page faults, compila hot paths.
    Primeiro score positivo da série (+1082). O detection_score também ficou
    positivo (+373).
 
-6. **Próximo desafio**: Melhorar a detecção. Com p99=195ms, há folga para
-   aumentar nprobe=3 e melhorar recall sem impacto relevante na latência.
-   O gap para o campeão (6000) está 82% na detecção (FP+FN=1146 vs 0).
+6. **v39 — nprobe=3 não ajudou**: FN ficou idêntico (413), FP variou 1 (ruído).
+   nprobe=2 já encontra os vizinhos corretos. O problema não está no recall
+   da busca, mas no algoritmo KNN=5 com threshold 0.6.
+
+7. **v40 — K=7**: Com 7 vizinhos, cada um tem peso de ~14% (vs 20% com K=5).
+   Threshold 0.6 fica mais conservador: 4/7=0.571 → approve (antes 3/5=0.6 → deny).
+   Hipótese: reduz FP por ser mais difícil negar uma transação.
+
+8. **Próximo desafio**: Se K=7 não resolver, investigar parser JSON (possíveis bugs
+   sutis), vetorização (fórmulas), ou considerar K adaptativo.
 
 ### Lições aprendidas
 

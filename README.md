@@ -107,7 +107,7 @@ README.md              # Este arquivo
 > Última submissão: **v39** (commit pendente) · Aguardando resultado
 > Docker Hub: `paulohrpinheiro/rinha-proxy:v39` + `rinha-api:v39`
 
-### 🏆 Melhor resultado: +1082 (v38) 🎉 PRIMEIRO SCORE POSITIVO
+### 🏆 Melhor resultado: +1082 (v38)
 
 | Componente | Valor | Corte |
 |:-----------|:-----:|:-----:|
@@ -127,18 +127,30 @@ README.md              # Este arquivo
 | Detection score | **+373** | −503 | +876 ✅ |
 | Final score | **+1082** | −3503 | **+4585 ✅** |
 
-### 🎯 v39 — Submissão atual (pendente)
+### Resultado v39: nprobe=3 — neutro
 
-| Mudança | v38 | v39 |
+| Métrica | v38 | v39 | Delta |
+|:--------|:---:|:---:|:-----:|
+| HTTP errors | 57 | 70 | +13 |
+| FP | 733 | 732 | −1 |
+| **FN** | **413** | **413** | **0** |
+| p99 | 195ms | 192ms | −3ms |
+| **Final score** | **+1082** | **+1073** | −9 |
+
+nprobe=3 varreu 50% mais vetores sem nenhum ganho de recall. FN idêntico prova
+que nprobe=2 já encontra os vizinhos corretos.
+
+### 🎯 v40 — Submissão atual (pendente)
+
+| Mudança | v39 | v40 |
 |:--------|:---:|:---:|
-| nprobe | 2 | **3** |
-| Proxy CPU | 0.19 | 0.19 |
-| API CPU | 0.405 | 0.405 |
-| Timeouts | 200ms | 200ms |
+| K (vizinhos) | 5 | **7** |
+| nprobe | 3 | **2** |
+| Threshold | 0.6 | 0.6 |
 
-**Hipótese**: Com p99=195ms (folga de latência), aumentar nprobe para 3 melhora
-o recall (reduz FN e FP) ao custo de ~40μs extras por busca — irrelevante.
-O detection_score pode subir de +373 para >+800.
+**Hipótese**: K=7 reduz sensibilidade a outliers (peso 14% vs 20% por vizinho).
+Com threshold 0.6, 4/7=0.571 → approve (mais conservador que 3/5=0.6 → deny).
+Deve reduzir FP, efeito em FN incerto.
 
 ### Evolução completa
 
@@ -163,7 +175,8 @@ O detection_score pode subir de +373 para >+800.
 | v36 | timeouts 100ms ❌ | 7.709 | 17.7% | 2001ms | −6000 |
 | v37 | proxy 0.17 CPU | **1.587** | **5.4%** | 2001ms | **−3503** |
 | v38 | proxy 0.19, client 200ms | **57** | **2.2%** | **195ms** | **+1082 🏆** |
-| **v39** | **nprobe=3** | **?** | **?** | **?** | **aguardando** |
+| v39 | nprobe=3 (neutro) | 70 | 2.3% | 192ms | +1073 |
+| **v40** | **K=7, nprobe=2** | **?** | **?** | **?** | **aguardando** |
 
 ### Marcos da série
 
@@ -229,15 +242,15 @@ zero alocações de string.
 Cada campo é normalizado para [0,1] seguindo as fórmulas em [REGRAS_DE_DETECCAO.md](./docs/REGRAS_DE_DETECCAO.md) e quantizado para int8 (0-127), reduzindo 4x o uso de memória.
 
 ### 4. Busca Vetorial (IVF Index)
-- Encontra os 3 centroides mais próximos (nprobe=3) entre 1.000 centroides
-- Busca os 5 vizinhos mais próximos dentro desses clusters (até 5.000 vetores por cluster)
+- Encontra os 2 centroides mais próximos (nprobe=2) entre 1.000 centroides
+- Busca os 7 vizinhos mais próximos dentro desses clusters (até 5.000 vetores por cluster)
 - Distribuição balanceada: clusters de 914 a 6.109 vetores (K-means corrigido, ADR-45)
-- Latência de busca: ~130µs (nprobe=3)
+- Latência de busca: ~90µs (nprobe=2, K=7)
 - Usa distância Manhattan com loop unrolled
 
 ### 5. Decisão
 ```
-fraud_score = fraudes_entre_os_5 / 5
+fraud_score = fraudes_entre_os_7 / 7
 approved = fraud_score < 0.6
 ```
 
@@ -289,7 +302,7 @@ Baixe do [repositório oficial da Rinha](https://github.com/zanfranceschi/rinha-
 |----------|:-----:|:---------:|
 | ManhattanDistance (14 dims) | ~14 ns | 0 B/op |
 | Normalize (payload -> vetor) | ~100 ns | 0 B/op |
-| IVF Search (Normalize + Search, 3 clusters) | ~130 µs | 0 B/op |
+| IVF Search (Normalize + Search, K=7, nprobe=2) | ~90 µs | 0 B/op |
 
 ### Benchmark de carga realista
 

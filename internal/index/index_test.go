@@ -45,10 +45,10 @@ func TestIVFSearch(t *testing.T) {
 		t.Fatalf("Search failed: %v", err)
 	}
 
-	// top-5 from cluster 0: labels alternate 0,1,0,1,0... so first 5 are {0,1,0,1,0}
-	// fraud count = 2
-	if fraudCount != 2 {
-		t.Errorf("Expected 2 frauds, got %d", fraudCount)
+	// top-7 from cluster 0: labels alternate 0,1,0,1,0,1,0...
+	// first 7 are {0,1,0,1,0,1,0} → fraud count = 3
+	if fraudCount != 3 {
+		t.Errorf("Expected 3 frauds, got %d", fraudCount)
 	}
 }
 
@@ -90,7 +90,7 @@ func TestIVFSearchExact(t *testing.T) {
 	offsets[3] = n
 
 	// Fill cluster 0 with vectors matching centroid 0
-	// Labels: first 3 legit, next 7 fraud (so top-5 should have 2 frauds from cluster 0)
+	// Labels: first 3 legit, next 7 fraud (top-7 = {0,0,0,1,1,1,1} → 4 frauds)
 	for i := 0; i < vectorsPerCluster; i++ {
 		vectors[i] = centroids[0]
 		if i < 3 {
@@ -123,9 +123,9 @@ func TestIVFSearchExact(t *testing.T) {
 		t.Fatalf("Search failed: %v", err)
 	}
 
-	// top-5 nearest are vectors from cluster 0 (distance 0)
-	// labels[0..4] = {0,0,0,1,1} -> 2 frauds
-	expectedFrauds := 2
+	// top-7 nearest are vectors from cluster 0 (distance 0)
+	// labels[0..6] = {0,0,0,1,1,1,1} -> 4 frauds
+	expectedFrauds := 4
 	if fraudCount != expectedFrauds {
 		t.Errorf("Expected %d frauds, got %d", expectedFrauds, fraudCount)
 	}
@@ -136,9 +136,9 @@ func TestIVFSearchExact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search far query failed: %v", err)
 	}
-	// top-5 nearest from nearest cluster (cluster 2, distance 27*14 = 378)
-	// all labels in cluster 2 are 1 -> 5 frauds
-	if fraudCount != 5 {
-		t.Errorf("Expected 5 frauds for far query, got %d", fraudCount)
+	// top-7 nearest from nearest cluster (cluster 2, distance 27*14 = 378)
+	// all labels in cluster 2 are 1 -> 7 frauds
+	if fraudCount != 7 {
+		t.Errorf("Expected 7 frauds for far query, got %d", fraudCount)
 	}
 }
