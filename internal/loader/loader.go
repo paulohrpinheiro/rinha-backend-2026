@@ -9,7 +9,6 @@ import (
 	"math"
 	"math/rand/v2"
 	"os"
-	"unsafe"
 
 	"rinha-backend/internal/model"
 	"rinha-backend/internal/vector"
@@ -20,11 +19,11 @@ import (
 //	Magic      [4]byte   "IVF\x01" (magic + version)
 //	NumVectors  uint32   little-endian
 //	NumCentroids uint32  little-endian
-//	Vectors     []byte   numVectors * 14 bytes (int8)
+//	Vectors     []byte   numVectors * 28 bytes (int16 LE)
 //	Labels      []byte   numVectors bytes (uint8)
-//	Centroids   []byte   numCentroids * 14 bytes (int8)
+//	Centroids   []byte   numCentroids * 28 bytes (int16 LE)
 //	Offsets     []byte   (numCentroids + 1) * 4 bytes (int32 LE)
-const indexMagic = "IVF\x01"
+const indexMagic = "IVF\x02"
 
 // IndexData holds a deserialized pre-built index.
 type IndexData struct {
@@ -68,13 +67,13 @@ func SaveIndex(path string, vectors []vector.Vector14, labels []uint8, centroids
 		return err
 	}
 
-	// 3. Write vectors (nVectors * 14 bytes)
-	vecLen := int(nVectors) * 14
+	// 3. Write vectors (nVectors * 28 bytes, int16 LE)
+	vecLen := int(nVectors) * 14 * 2
 	vecBytes := make([]byte, vecLen)
 	for i, v := range vectors {
-		off := i * 14
+		off := i * 14 * 2
 		for d := 0; d < 14; d++ {
-			vecBytes[off+d] = byte(v[d])
+			binary.LittleEndian.PutUint16(vecBytes[off+d*2:], uint16(v[d]))
 		}
 	}
 	if _, err := f.Write(vecBytes); err != nil {
@@ -86,13 +85,13 @@ func SaveIndex(path string, vectors []vector.Vector14, labels []uint8, centroids
 		return err
 	}
 
-	// 5. Write centroids (nCentroids * 14 bytes)
-	centLen := int(nCentroids) * 14
+	// 5. Write centroids (nCentroids * 28 bytes, int16 LE)
+	centLen := int(nCentroids) * 14 * 2
 	centBytes := make([]byte, centLen)
 	for i, c := range centroids {
-		off := i * 14
+		off := i * 14 * 2
 		for d := 0; d < 14; d++ {
-			centBytes[off+d] = byte(c[d])
+			binary.LittleEndian.PutUint16(centBytes[off+d*2:], uint16(c[d]))
 		}
 	}
 	if _, err := f.Write(centBytes); err != nil {
@@ -135,11 +134,11 @@ func LoadIndex(path string) (*IndexData, error) {
 	}
 
 	vecOffset := 12
-	vecLen := int(nVectors) * 14
+	vecLen := int(nVectors) * 14 * 2
 	labelsOffset := vecOffset + vecLen
 	labelsLen := int(nVectors)
 	centOffset := labelsOffset + labelsLen
-	centLen := int(nCentroids) * 14
+	centLen := int(nCentroids) * 14 * 2
 	offOffset := centOffset + centLen
 	offLen := (int(nCentroids) + 1) * 4
 
@@ -147,14 +146,14 @@ func LoadIndex(path string) (*IndexData, error) {
 		return nil, errors.New("index file truncated")
 	}
 
-	// Read vectors — convert byte slice to int8 vectors
+	// Read vectors — convert int16 LE to int16
 	vecSlice := data[vecOffset : vecOffset+vecLen]
 	vectors := make([]vector.Vector14, nVectors)
 	for i := range vectors {
-		off := i * 14
-		// Use unsafe to cast byte slice to int8 array pointer, then copy
-		src := unsafe.Slice((*int8)(unsafe.Pointer(&vecSlice[off])), 14)
-		copy(vectors[i][:], src)
+		off := i * 14 * 2
+		for d := 0; d < 14; d++ {
+			vectors[i][d] = int16(binary.LittleEndian.Uint16(vecSlice[off+d*2:]))
+		}
 	}
 
 	// Read labels
@@ -165,9 +164,10 @@ func LoadIndex(path string) (*IndexData, error) {
 	centSlice := data[centOffset : centOffset+centLen]
 	centroids := make([]vector.Vector14, nCentroids)
 	for i := range centroids {
-		off := i * 14
-		src := unsafe.Slice((*int8)(unsafe.Pointer(&centSlice[off])), 14)
-		copy(centroids[i][:], src)
+		off := i * 14 * 2
+		for d := 0; d < 14; d++ {
+			centroids[i][d] = int16(binary.LittleEndian.Uint16(centSlice[off+d*2:]))
+		}
 	}
 
 	// Read offsets
@@ -319,7 +319,7 @@ func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]
 		for i, idx := range sampleIndices {
 			bestD := int32(math.MaxInt32)
 			for j := 0; j < c; j++ {
-				d := vector.ManhattanDistance(&vectors[idx], &centroids[j])
+				d := vector.EuclideanDistanceSquared(&vectors[idx], &centroids[j])
 				if d < bestD {
 					bestD = d
 				}
@@ -372,9 +372,9 @@ func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]
 		// For each batch vector, assign to nearest centroid
 		for _, idx := range batch {
 			bestC := 0
-			bestD := vector.ManhattanDistance(&vectors[idx], &centroids[0])
+			bestD := vector.EuclideanDistanceSquared(&vectors[idx], &centroids[0])
 			for c := 1; c < nClusters; c++ {
-				d := vector.ManhattanDistance(&vectors[idx], &centroids[c])
+				d := vector.EuclideanDistanceSquared(&vectors[idx], &centroids[c])
 				if d < bestD {
 					bestD = d
 					bestC = c
@@ -414,9 +414,9 @@ func BuildIVFIndex(vectors []vector.Vector14, labels []uint8, nClusters int) ([]
 	// 3. Assign ALL vectors to nearest centroid
 	for i := 0; i < n; i++ {
 		bestC := 0
-		bestD := vector.ManhattanDistance(&vectors[i], &centroids[0])
+		bestD := vector.EuclideanDistanceSquared(&vectors[i], &centroids[0])
 		for c := 1; c < nClusters; c++ {
-			d := vector.ManhattanDistance(&vectors[i], &centroids[c])
+			d := vector.EuclideanDistanceSquared(&vectors[i], &centroids[c])
 			if d < bestD {
 				bestD = d
 				bestC = c

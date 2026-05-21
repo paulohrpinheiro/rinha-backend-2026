@@ -22,37 +22,29 @@ var testNorm = &NormalizationConfig{
 	},
 }
 
-func withinTolerance(actual, expected int8) bool {
-	diff := int(actual) - int(expected)
-	if diff < 0 {
-		diff = -diff
-	}
-	return diff <= 1
-}
-
 func TestQuantize(t *testing.T) {
 	tests := []struct {
 		input    float64
-		expected int8
+		expected int16
 	}{
 		{0.0, 0},
-		{1.0, 127},
-		{0.5, 64},
+		{1.0, 10000},
+		{0.5, 5000},
 		{-1.0, -1},
 		{-0.5, 0},
-		{1.5, 127},
-		{0.0041, 1},
-		{0.1667, 21},
-		{0.7826, 99},
-		{0.3333, 42},
-		{0.0292, 4},
-		{0.15, 19},
-		{0.006, 1},
-		{0.9506, 121},
-		{0.8333, 106},
-		{0.2174, 28},
-		{0.9523, 121},
-		{0.0055, 1},
+		{1.5, 10000},
+		{0.0041, 41},
+		{0.1667, 1667},
+		{0.7826, 7826},
+		{0.3333, 3333},
+		{0.0292, 292},
+		{0.15, 1500},
+		{0.006, 60},
+		{0.9506, 9506},
+		{0.8333, 8333},
+		{0.2174, 2174},
+		{0.9523, 9523},
+		{0.0055, 55},
 	}
 	for _, tt := range tests {
 		got := Quantize(tt.input)
@@ -63,14 +55,14 @@ func TestQuantize(t *testing.T) {
 }
 
 func TestManhattanDistance(t *testing.T) {
-	vEqual1 := &Vector14{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	vEqual2 := &Vector14{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	vEqual1 := &Vector14{}
+	vEqual2 := &Vector14{}
 	if d := ManhattanDistance(vEqual1, vEqual2); d != 0 {
 		t.Errorf("equal vectors distance = %d, want 0", d)
 	}
 
-	vA := &Vector14{10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	vB := &Vector14{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	vA := &Vector14{10}
+	vB := &Vector14{}
 	if d := ManhattanDistance(vA, vB); d != 10 {
 		t.Errorf("single diff distance = %d, want 10", d)
 	}
@@ -82,7 +74,7 @@ func TestManhattanDistance(t *testing.T) {
 	}
 
 	vE := &Vector14{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
-	vF := &Vector14{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	vF := &Vector14{}
 	if d := ManhattanDistance(vE, vF); d != 14 {
 		t.Errorf("sentinel distance = %d, want 14", d)
 	}
@@ -90,9 +82,40 @@ func TestManhattanDistance(t *testing.T) {
 		t.Errorf("both sentinel distance = %d, want 0", d)
 	}
 
-	vMax := &Vector14{127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127}
-	if d := ManhattanDistance(vEqual1, vMax); d != 127*14 {
-		t.Errorf("max distance = %d, want %d", d, 127*14)
+	vMax := &Vector14{10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000}
+	if d := ManhattanDistance(vEqual1, vMax); d != 10000*14 {
+		t.Errorf("max distance = %d, want %d", d, 10000*14)
+	}
+}
+
+func TestEuclideanDistanceSquared(t *testing.T) {
+	vEqual1 := &Vector14{}
+	vEqual2 := &Vector14{}
+	if d := EuclideanDistanceSquared(vEqual1, vEqual2); d != 0 {
+		t.Errorf("equal vectors distance = %d, want 0", d)
+	}
+
+	vA := &Vector14{10}
+	vB := &Vector14{}
+	if d := EuclideanDistanceSquared(vA, vB); d != 100 {
+		t.Errorf("single diff distance = %d, want 100", d)
+	}
+
+	vC := &Vector14{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+	vD := &Vector14{14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1}
+	// diff each dim: 13,11,9,7,5,3,1,-1,-3,-5,-7,-9,-11,-13
+	// squares: 169+121+81+49+25+9+1+1+9+25+49+81+121+169 = 910
+	if d := EuclideanDistanceSquared(vC, vD); d != 910 {
+		t.Errorf("multi-diff dist = %d, want 910", d)
+	}
+
+	vE := &Vector14{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
+	vF := &Vector14{}
+	if d := EuclideanDistanceSquared(vE, vF); d != 14 {
+		t.Errorf("sentinel dist = %d, want 14", d)
+	}
+	if d := EuclideanDistanceSquared(vE, vE); d != 0 {
+		t.Errorf("both sentinel dist = %d, want 0", d)
 	}
 }
 
@@ -115,34 +138,26 @@ func TestNormalizeLegitTx(t *testing.T) {
 
 	result := Normalize(payload, testNorm)
 
-	expectedFloats := []float64{
-		0.0041, 0.1667, 0.05, 0.7826, 0.5,
-		-1, -1,
-		0.0292, 0.15, 0, 1, 0, 0.15, 0.006,
-	}
-
-	for i, f := range expectedFloats {
-		expected := Quantize(f)
-		if !withinTolerance(result[i], expected) {
-			t.Errorf("legit dim[%d] = %d (float=%v), expected around %d (float=%v), diff > 1",
-				i, result[i], f, expected, f)
-		}
-	}
-
-	if result[9] != 0 {
-		t.Errorf("dim9 (is_online) = %d, want 0", result[9])
-	}
-	if result[10] != 127 {
-		t.Errorf("dim10 (card_present) = %d, want 127", result[10])
-	}
-	if result[11] != 0 {
-		t.Errorf("dim11 (known_merchant) = %d, want 0", result[11])
-	}
+	// Check key dims
 	if result[5] != -1 {
 		t.Errorf("dim5 (no last tx) = %d, want -1", result[5])
 	}
 	if result[6] != -1 {
 		t.Errorf("dim6 (no last tx) = %d, want -1", result[6])
+	}
+	if result[9] != 0 {
+		t.Errorf("dim9 (is_online) = %d, want 0", result[9])
+	}
+	if result[10] != 10000 {
+		t.Errorf("dim10 (card_present) = %d, want 10000", result[10])
+	}
+	if result[11] != 0 {
+		t.Errorf("dim11 (known_merchant) = %d, want 0 (MERC-016 is known)", result[11])
+	}
+
+	// dim0: 41.12 / 10000 = 0.004112 * 10000 = 41
+	if result[0] != 41 {
+		t.Errorf("dim0 (amount) = %d, want 41", result[0])
 	}
 }
 
@@ -165,28 +180,22 @@ func TestNormalizeFraudTx(t *testing.T) {
 
 	result := Normalize(payload, testNorm)
 
-	expectedFloats := []float64{
-		0.9506, 0.8333, 1.0, 0.2174, 1.0,
-		-1, -1,
-		0.9523, 1.0, 0, 1, 1, 0.75, 0.0055,
-	}
-
-	for i, f := range expectedFloats {
-		expected := Quantize(f)
-		if !withinTolerance(result[i], expected) {
-			t.Errorf("fraud dim[%d] = %d (float=%v), expected around %d (float=%v), diff > 1",
-				i, result[i], f, expected, f)
-		}
-	}
-
 	if result[9] != 0 {
 		t.Errorf("dim9 (is_online) = %d, want 0", result[9])
 	}
-	if result[10] != 127 {
-		t.Errorf("dim10 (card_present) = %d, want 127", result[10])
+	if result[10] != 10000 {
+		t.Errorf("dim10 (card_present) = %d, want 10000", result[10])
 	}
-	if result[11] != 127 {
-		t.Errorf("dim11 (unknown_merchant) = %d, want 127", result[11])
+	if result[11] != 10000 {
+		t.Errorf("dim11 (unknown_merchant) = %d, want 10000 (MERC-068 not in known)", result[11])
+	}
+	// dim12: mcc_risk 7802 = 0.75 * 10000 = 7500
+	if result[12] != 7500 {
+		t.Errorf("dim12 (mcc_risk 7802) = %d, want 7500", result[12])
+	}
+	// dim0: 9505.97 / 10000 = 0.950597 * 10000 = 9506
+	if result[0] != 9506 {
+		t.Errorf("dim0 (amount) = %d, want 9506", result[0])
 	}
 }
 
@@ -218,17 +227,17 @@ func TestNormalizeLastTx(t *testing.T) {
 		t.Errorf("dim6 (km from last tx) should not be -1")
 	}
 
-	// minutes since last tx: 5 min → 5/1440 ≈ 0.00347 → quantize → 0
-	if result[5] != 0 {
-		t.Errorf("dim5 (5min) = %d, expected 0", result[5])
+	// minutes since last tx: 5 min → 5/1440 ≈ 0.00347 → quantize → 35
+	if result[5] != 35 {
+		t.Errorf("dim5 (5min) = %d, expected 35", result[5])
 	}
-	// km from last tx: 10 → 10/1000 = 0.01 → quantize → 1
-	if result[6] != 1 {
-		t.Errorf("dim6 (10km) = %d, expected 1", result[6])
+	// km from last tx: 10 → 10/1000 = 0.01 → quantize → 100
+	if result[6] != 100 {
+		t.Errorf("dim6 (10km) = %d, expected 100", result[6])
 	}
 	// is_online
-	if result[9] != 127 {
-		t.Errorf("dim9 (is_online) = %d, want 127", result[9])
+	if result[9] != 10000 {
+		t.Errorf("dim9 (is_online) = %d, want 10000", result[9])
 	}
 	// card_present false
 	if result[10] != 0 {
@@ -240,23 +249,23 @@ func TestNormalizeMissingMCC(t *testing.T) {
 	payload := &parser.Payload{
 		Amount:         100.0,
 		Installments:   1,
-		RequestedAt:    time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC),
+		RequestedAt:    time.Date(2026, 3, 14, 10, 0, 0, 0, time.UTC),
 		AvgAmount:      200.0,
-		TxCount24h:     1,
-		KnownMerchants: []string{"MERC-001"},
-		MerchantID:     "MERC-001",
+		TxCount24h:     5,
+		KnownMerchants: []string{},
+		MerchantID:     "MERC-999",
 		MCC:            "9999",
-		MerchantAvgAmount: 100.0,
+		MerchantAvgAmount: 50.0,
 		IsOnline:       false,
-		CardPresent:    true,
+		CardPresent:    false,
 		KmFromHome:     10.0,
 		HasLastTransaction: false,
 	}
 
 	result := Normalize(payload, testNorm)
 
-	// Missing MCC defaults to 0.5 → quantize(0.5) = 64
-	if result[12] != 64 {
-		t.Errorf("dim12 (missing mcc risk) = %d, want 64 (risk=0.5)", result[12])
+	// dim12: mcc not in lookup → default 0.5 → quantize → 5000
+	if result[12] != 5000 {
+		t.Errorf("dim12 (missing mcc) = %d, want 5000 (default 0.5)", result[12])
 	}
 }

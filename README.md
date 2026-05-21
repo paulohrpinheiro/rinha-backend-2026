@@ -171,6 +171,21 @@ Threshold não faz diferença — K=7 é pior que K=5 em qualquer threshold.
 ferramenta `diag` para validação cruzada do parser (0 discrepâncias
 encontradas — parser validado).
 
+### Resultado v42: reprodutibilidade confirmada
+
+FP/FN idênticos à v38 (±1). Score +1075 ≈ +1082. Config K=5 thr=0.6 é estável.
+
+### 🎯 v43 — Submissão atual (pendente)
+
+| Mudança | v42 | v43 |
+|:--------|:---:|:---:|
+| Vetor | int8 (0-127) | **int16 (0-10000)** |
+| Distância | Manhattan (L1) | **Euclidiana² (L2²)** |
+| Precisão | 128 níveis | 10000 níveis (78×) |
+
+**Hipótese**: int16 + Euclidiana (como o campeão) elimina perda de precisão
+da quantização int8, melhorando a ordenação KNN. Alvo: FP+FN < 800.
+
 ### Evolução completa
 
 | Versão | Mudança chave | HTTP Errs | Failure | p99 | Score |
@@ -197,7 +212,8 @@ encontradas — parser validado).
 | v39 | nprobe=3 (neutro) | 70 | 2.3% | 192ms | +1073 |
 | v40 | K=7, thr=0.6 | 112 | 2.1% | 201ms | +922 |
 | v41 | K=7, thr=0.572 | 161 | 2.2% | 206ms | +866 |
-| **v42** | **reverte K=5 + diag tool** | **?** | **?** | **?** | **aguardando** |
+| v42 | reverte K=5 + diag | 70 | 2.3% | 192ms | +1075 |
+| **v43** | **int16 + Euclidiana** | **?** | **?** | **?** | **aguardando** |
 
 ### Marcos da série
 
@@ -264,15 +280,15 @@ Cada campo é normalizado para [0,1] seguindo as fórmulas em [REGRAS_DE_DETECCA
 
 ### 4. Busca Vetorial (IVF Index)
 - Encontra os 2 centroides mais próximos (nprobe=2) entre 1.000 centroides
-- Busca os 7 vizinhos mais próximos dentro desses clusters (até 5.000 vetores por cluster)
+- Busca os 5 vizinhos mais próximos dentro desses clusters (até 5.000 vetores por cluster)
 - Distribuição balanceada: clusters de 914 a 6.109 vetores (K-means corrigido, ADR-45)
-- Latência de busca: ~90µs (nprobe=2, K=7)
-- Usa distância Manhattan com loop unrolled
+- Latência de busca: ~100µs (nprobe=2, K=5, Euclidiana²)
+- Usa distância Euclidiana ao quadrado (int16, escala 10000)
 
 ### 5. Decisão
 ```
-fraud_score = fraudes_entre_os_7 / 7
-approved = fraud_score < 0.572
+fraud_score = fraudes_entre_os_5 / 5
+approved = fraud_score < 0.6
 ```
 
 ---
@@ -323,7 +339,7 @@ Baixe do [repositório oficial da Rinha](https://github.com/zanfranceschi/rinha-
 |----------|:-----:|:---------:|
 | ManhattanDistance (14 dims) | ~14 ns | 0 B/op |
 | Normalize (payload -> vetor) | ~100 ns | 0 B/op |
-| IVF Search (Normalize + Search, K=7, nprobe=2) | ~90 µs | 0 B/op |
+| IVF Search (Normalize + Search, K=5, nprobe=2) | ~100 µs | 0 B/op |
 
 ### Benchmark de carga realista
 

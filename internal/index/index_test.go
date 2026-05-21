@@ -19,7 +19,7 @@ func TestIVFSearch(t *testing.T) {
 	// Create centroids at increasing distances
 	for c := 0; c < nClusters; c++ {
 		for d := 0; d < 14; d++ {
-			centroids[c][d] = int8(c * 10)
+			centroids[c][d] = int16(c * 10)
 		}
 		offsets[c] = c * vectorsPerCluster
 	}

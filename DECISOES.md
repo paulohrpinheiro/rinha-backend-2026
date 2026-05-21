@@ -2581,3 +2581,102 @@ que a detecção perfeita é possível com os dados disponíveis.
 - `cmd/proxy/main.go`: fraudResponses[6], fraudCount*5
 - `internal/index/index_test.go`: testes K=5
 - `cmd/diag/main.go`: novo — validação cruzada parser
+
+---
+
+## ADR-76: v42 — reprodutibilidade confirmada (score +1075 ≈ v38 +1082)
+
+**Contexto**: A v42 reverteu para K=5 thr=0.6 (config v38) e adicionou a ferramenta
+de validação cruzada. A hipótese era confirmar a reprodutibilidade da v38.
+
+**Resultado oficial (v42, 2026-05-21)**:
+
+| Métrica | v38 | v42 | Delta |
+|---------|:---:|:---:|:-----:|
+| FP | 733 | 734 | +1 |
+| FN | 413 | 412 | −1 |
+| HTTP errors | 57 | 70 | +13 |
+| p99 | 195ms | 192ms | −3ms |
+| **final_score** | **+1082** | **+1075** | **−7** |
+
+**Análise**: FP, FN, e score são estatisticamente idênticos entre v38 e v42.
+A configuração K=5 thr=0.6 é estável e reprodutível (±7 pontos de score).
+A ferramenta `diag` validou o parser (0 divergências em 50 payloads).
+
+**Conclusão**: O piso de ~2.1% de erro (FP+FN≈1146) é inerente à abordagem
+atual: int8 + Manhattan + IVF. Para superar esse piso, é necessário mudar
+a representação ou a métrica.
+
+---
+
+## ADR-77: Análise do campeão (MXLange/c-api-rinha2026)
+
+**Contexto**: O campeão tem score 6000 (0 FP, 0 FN, 0 HTTP errors, p99=0.98ms).
+Seu código foi analisado para entender as diferenças.
+
+**Diferenças críticas encontradas**:
+
+| Característica | Nós (v42) | Campeão |
+|:--------------|:----------|:--------|
+| Tipo do vetor | int8 (0-127) | **int16 (0-10000)** |
+| Precisão | 128 níveis | **10000 níveis (78× mais)** |
+| Distância | Manhattan (L1) | **Euclidiana² (L2²)** |
+| Índice | IVF 1000 clusters | **Árvore de partições por features** |
+| SIMD | não | AVX2 (8 lanes) |
+| Block pruning | não (só maxScanPerCluster) | min/max bounds por nó |
+| Early exit | não | para se dist < threshold |
+| K | 5 | 5 |
+| Threshold | 0.6 | ? |
+| Memória por vetor | 14 bytes | 28 bytes |
+
+**Hipóteses para 0 FP/FN**:
+
+1. **int16 com escala 10000** — precisão 78× maior que int8. Com int8, a perda
+   de precisão pode inverter a ordenação de vizinhos muito próximos.
+
+2. **Distância euclidiana ao quadrado** — penaliza grandes diferenças mais que
+   Manhattan, potencialmente melhorando a discriminação.
+
+3. **Particionamento por features** — em vez de clusters K-means, usa uma árvore
+   de decisão baseada em has_last_tx, is_online, card_present, unknown_merchant,
+   mcc_risk. Isso é semanticamente mais relevante que proximidade geométrica.
+
+**Estratégia para v43**: Implementar as duas mudanças mais factíveis — int16
+(escala 10000) e distância euclidiana. A árvore de partições exigiria reescrita
+do build_index e do formato do índice.
+
+---
+
+## ADR-78: v43 — int16 (escala 10000) + distância Euclidiana
+
+**Contexto**: A análise do campeão revelou que int8 (128 níveis) e Manhattan
+podem ser a causa do piso de 2.1% de erro. A migração para int16 (10000 níveis)
+e distância euclidiana deve melhorar a precisão da busca KNN.
+
+**Decisão**:
+
+1. **Vector14**: `[14]int8` → `[14]int16`. Sentinela: -1 (mantido).
+
+2. **Quantize**: `clamp(v) * 127` → `clamp(v) * 10000`. Valores de 0 a 10000.
+
+3. **Distância**: Manhattan (soma |diff|) → Euclidiana² (soma diff²).
+   `EuclideanDistanceSquared(a, b) = Σ(a[i] - b[i])²`.
+
+4. **Loader**: Atualizar formato binário do índice (index.bin) para int16.
+
+5. **nprobe=2, K=5, thr=0.6 mantidos**.
+
+**Impacto em memória**: 3M vetores × 14 × 2 bytes = 84 MB (era 42 MB com int8).
+Ainda cabe em 165 MB por API (84 MB vetores + labels + centroides + offsets < 120 MB).
+
+**Arquivos alterados**:
+- `internal/vector/normalize.go`: Vector14 int16, Quantize 10000, EuclideanDistanceSquared
+- `internal/vector/normalize_test.go`: testes atualizados
+- `internal/index/index.go`: EuclideanDistanceSquared
+- `internal/index/index_test.go`: testes atualizados
+- `internal/loader/loader.go`: serialização int16
+- `internal/handler/fraud.go`: sem mudanças (usa interface abstrata)
+
+**Hipótese**: int16 com escala 10000 + distância euclidiana reduzirá o erro de
+quantização e melhorará a ordenação KNN, reduzindo FP e FN. Alvo: FP+FN < 800
+(vs ~1146 atual), score > +1500.
