@@ -95,25 +95,25 @@ README.md              # Este arquivo
 
 ## Resultados do Teste Oficial (Evolução)
 
-> Última submissão: **v50** · score +1149
-> Docker Hub: `paulohrpinheiro/rinha-proxy:v50` + `rinha-api:v50`
+> Última submissão: **v51** · score +3190
+> Docker Hub: `paulohrpinheiro/rinha-nginx:v51` + `rinha-api:v51`
 
-### 🏆 Melhor resultado: +1149 (v50)
+### 🏆 Melhor resultado: +3190 (v51)
 
 | Componente | Valor | Corte |
 |:-----------|:-----:|:-----:|
-| `score_p99` | **+742** | p99 = 181.27ms < 2000ms ✅ |
-| `score_det` | **+407** | failure_rate = 2.18% (< 15%) ✅ |
-| **Final** | **+1149** | Novo recorde! 🏆 |
+| `score_p99` | **+2742** | p99 = 1.81ms < 2000ms ✅ |
+| `score_det` | **+448** | failure_rate = 2.13% (< 15%) ✅ |
+| **Final** | **+3190** | Novo recorde! 🏆 |
 
-| Métrica | v50 | v44 (baseline) | Delta |
+| Métrica | v51 | v50 (baseline) | Delta |
 |:--------|:---:|:---:|:-----:|
-| HTTP errors | **31** | 67 | **−53.7%** ✅ |
+| HTTP errors | **0** | 31 | **−100%** ✅ |
 | FP | **735** | 735 | **0** |
-| FN | **411** | 413 | **−2** |
-| **p99** | **181ms** | 192ms | **−5.7%** ✅ |
-| Detection score | **+407** | +360 | +47 |
-| Final score | **+1149** | +1076 | **+73** ✅ |
+| FN | **414** | 411 | **+3** |
+| **p99** | **1.81ms** | 181ms | **−99%** ✅ |
+| Detection score | **+448** | +407 | +41 |
+| Final score | **+3190** | +1149 | **+2041** ✅ |
 
 ### Resultado v39: nprobe=3 — neutro
 
@@ -178,11 +178,30 @@ inadequado — sistema aprova quase tudo.
 
 Três versões (v38/v42/v44) com score ~+1075. Configuração estável atingida.
 
+### 🚀 Resultado v51: nginx + JSON direto — salto quântico
+
+| Métrica | v50 | v51 | Delta |
+|:--------|:---:|:---:|:-----:|
+| HTTP errors | 31 | **0** | **−100%** ✅ |
+| FP | 735 | **735** | 0 |
+| FN | 411 | **414** | +3 |
+| **p99** | **181ms** | **1.81ms** | **−99%** ✅ |
+| **Final score** | **+1149** | **+3190** | **+2041** ✅ |
+
+**O que mudou**: proxy Go customizado → nginx:alpine (stream + least_conn + Unix sockets).
+API passou a retornar JSON direto em vez de codec binário de 9 bytes.
+
+**Impacto**: o proxy Go era o gargalo dominante desde as primeiras versões.
+nginx:alpine é um proxy TCP extremamente otimizado em C — zero overhead de
+runtime, zero alocações, zero goroutines. O p99 de 1.81ms coloca o gargalo
+agora na própria API Go (parsing JSON + IVF search ~90µs).
+
 ### Próximos passos
 
 Ver [DECISOES.md](./DECISOES.md#adr-81-v44--platô-confirmado-score-1076-config-estável) para
 análise do platô e caminhos à frente (árvore de partições, recalibração int16,
-weighted KNN, zerar HTTP errors).
+weighted KNN). Com p99 em 1.81ms e zero HTTP errors, o próximo gargalo é a
+detecção — otimizar IVF, calibrar threshold, reduzir FP/FN.
 
 ### Evolução completa
 
@@ -214,8 +233,9 @@ weighted KNN, zerar HTTP errors).
 | v43 | int16+Euclidiana ❌ | 56 | 35.9% | 198ms | −2296 |
 | v44 | reverte int8 (platô) | 67 | 2.3% | 192ms | +1076 |
 | **v50** | **bump tag + estabilidade** | **31** | **2.2%** | **181ms** | **+1149 🏆** |
+| **v51** | **nginx + JSON direto** | **0** | **2.1%** | **1.81ms** | **+3190 🏆** |
 
-> **Platô quebrado**: v50 (+1149) supera o platô de +1076 com p99 6% menor e HTTP errors 54% menores.
+> **Salto quântico**: v51 (+3190) substitui proxy Go por nginx:alpine, eliminando o gargalo do proxy. p99 caiu de 181ms → 1.81ms (100×), HTTP errors zeraram. Detecção inalterada (FP/FN = ±3).
 
 ### Marcos da série
 
@@ -225,9 +245,9 @@ weighted KNN, zerar HTTP errors).
 | Primeiro score > −6000 | v20 | −2700 com proxy custom |
 | Detection sem corte | v35 | −565 (failure < 15%) |
 | **Primeiro score positivo** | **v38** | **+1082** 🎉 |
-| Menos HTTP errors | v50 | 31 (−54% vs v44) |
-| Melhor score | v50 | **+1149** 🏆 |
-| Melhor p99 | v50 | **181ms** |
+| Menos HTTP errors | v51 | **0** (−100% vs v50) |
+| Melhor score | v51 | **+3190** 🏆 |
+| Melhor p99 | v51 | **1.81ms** |
 
 ### Lições Aprendidas
 
@@ -247,6 +267,7 @@ weighted KNN, zerar HTTP errors).
 | 🔬 **Diagnóstico é tão importante quanto otimização** | Sem contadores (ADR-46), as 21k requisições "fantasmas" do v26 eram invisíveis. Adicionar `/debug/vars` em proxy e APIs revelou exatamente onde cada requisição estava. |
 | 🎛️ **Timeouts muito curtos causam falsos timeouts** | Com GOMAXPROCS=1 e 180 req/s, uma goroutine pode esperar >100ms pelo scheduler. Timeout de 100ms dispara antes do processamento começar. |
 | ⚖️ **Capacidade do semáforo é uma curva em U** | 16 slots (v20): muitos 503. 128 bloqueante (v24): cascade. 1024 (v26): scheduler thrashing. 256 (v27): equilíbrio. |
+| 🌐 **nginx elimina o proxy como gargalo** | Proxy Go com 0.19 CPU era o bottleneck dominante. nginx:alpine com stream mode faz proxy TCP puro em C — p99 caiu de 181ms → 1.81ms (100×) sem mudar a API. |
 | 📝 **Parser JSON manual supera codec binário** | v34 removeu o codec de ida e passou a forwardar JSON bruto. v35 corrigiu bugs de keyLen. Resultado: HTTP errors −67%, throughput +27%, detection_score saiu do corte. |
 | ⏱️ **Timeout de 100ms é contraproducente** | v36 tentou baixar p99 com timeouts 100ms. Resultado: +325% HTTP errors, falhou o detection_score. Com GOMAXPROCS=1, scheduling jitter >100ms é comum. |
 | 📈 **Mais CPU no proxy melhora consistentemente** | v35→v37: proxy 0.15→0.17, HTTP errors −12.4%, score +61. v38 tenta proxy 0.19. O proxy é o gargalo principal. |
