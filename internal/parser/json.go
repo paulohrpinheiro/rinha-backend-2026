@@ -24,7 +24,13 @@ type Payload struct {
 }
 
 func ParseJSON(body []byte, p *Payload) error {
+	// Save KnownMerchants slice header before zeroing the struct.
+	// This preserves the backing array capacity for reuse across requests,
+	// avoiding a heap allocation on every call. With ~180 req/s, saving
+	// one make([]string, N) per request reduces GC pressure noticeably.
+	savedKM := p.KnownMerchants
 	*p = Payload{}
+	p.KnownMerchants = savedKM[:0]
 	var knownBuf [32]string
 	var knownCount int
 
@@ -78,8 +84,15 @@ func ParseJSON(body []byte, p *Payload) error {
 		}
 	}
 
+	// Reuse KnownMerchants backing array when capacity is sufficient.
+	// This avoids a heap allocation per request — the slice grows only
+	// when a particular request has more known merchants than any previous.
 	if knownCount > 0 {
-		p.KnownMerchants = make([]string, knownCount)
+		if cap(p.KnownMerchants) >= knownCount {
+			p.KnownMerchants = p.KnownMerchants[:knownCount]
+		} else {
+			p.KnownMerchants = make([]string, knownCount)
+		}
 		copy(p.KnownMerchants, knownBuf[:knownCount])
 	}
 	return nil

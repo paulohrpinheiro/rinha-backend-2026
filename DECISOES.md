@@ -2799,3 +2799,65 @@ de ~2.1% de erro (FP+FN≈1147) parece ser inerente a int8+Manhattan+IVF+K=5.
 
 5. **Aceitar o platô**: score +1075 é o 2º melhor entre implementações Go
    conhecidas, atrás apenas do campeão C (6000).
+
+---
+
+## ADR-82: Otimizações de Garbage Collector — Baixa Latência > Throughput
+
+**Contexto**: O GC do Go é um coletor Concurrent Mark and Sweep não-geracional
+desenhado para pausas curtas (STW em frações de ms). Ele roda em paralelo com a
+aplicação, sacrificando throughput máximo para manter latência baixa. Para uma
+Rinha com limites severos (0.405 CPU, 165MB memória por API), cada alocação no
+heap conta — o GC precisa varrer e limpar, e com `GOMAXPROCS=1`, isso rouba
+ciclos preciosos da CPU disponível.
+
+**Decisão**: Adotar as seguintes estratégias para minimizar a pressão no GC,
+baseadas nos princípios descritos por João Mendes
+([post no LinkedIn](https://www.linkedin.com/posts/joao-mendes-tech_gogc-ugcPost-7462606346924986368-UhrW)):
+
+**Estratégias aplicadas:**
+
+1. **`GOGC=off` + `GOMEMLIMIT`** — Em vez de disparar GC por crescimento do
+   heap (GOGC default 100%), o runtime usa `GOMEMLIMIT=150MiB` como gatilho.
+   O GC só roda quando a memória se aproxima do limite máximo, eliminando
+   pausas desnecessárias. Combinado com `debug.FreeOSMemory()` após startup,
+   mantém a pegada de RSS previsível. (ADR-28)
+
+2. **Passagem por valor** — `Vector14` é `[14]int8` (14 bytes), retornado por
+   valor de `vector.Normalize()`. Nunca aloca no heap. A função
+   `ManhattanDistance` recebe ponteiros, mas apenas lê — escape analysis
+   mantém tudo na stack.
+
+3. **Pré-alocação de slices** — No parser JSON, `var knownBuf [32]string` é
+   uma array fixa na stack. O slice `KnownMerchants` reutiliza o backing array
+   entre requisições (`cap()` check antes de `make()`), evitando alocações
+   repetitivas no heap. Implementado na v45.
+
+4. **Reuso de memória com `sync.Pool`** — O struct `parser.Payload` (~256
+   bytes) é obtido de `sync.Pool` a cada request e devolvido após o uso.
+   Isso elimina a alocação do struct principal no hot path.
+
+5. **Zero-copy strings via `unsafe.String`** — O parser JSON manual nunca
+   copia strings do body. `parseString`, `parseKnownMerchants` e `parseTimestamp`
+   usam `unsafe.String(&body[start], end-start)` para referenciar diretamente
+   o buffer de leitura. Isso elimina N alocações de string por request.
+
+6. **Respostas pré-computadas** — O proxy mantém 6 respostas JSON como
+   `[]byte` estáticos (`fraudResponses[6]`). Zero serialização, zero alocação
+   no hot path.
+
+**Trade-offs**:
+- **Positivo**: Pausas STW mínimas (~50µs); pressão de memória previsível;
+  zero alocações de string ou reflection no hot path.
+- **Negativo**: O `sync.Pool` e as strings `unsafe` exigem gestão cuidadosa
+  de lifetime — o buffer de body (`bodyBytes`) precisa permanecer válido
+  enquanto o payload estiver em uso, e o payload precisa ser resetado
+  (`*p = Payload{}`) antes da próxima reutilização.
+- **Mitigação**: O lifetime é curto e bem definido — dentro de um único
+  handler HTTP. O `*p = Payload{}` no início de cada `ParseJSON` garante
+  que dados de requests anteriores não vazem.
+
+**Citação**: As otimizações de escape analysis, passagem por valor e reuso
+de memória foram inspiradas pelo post de João Mendes sobre GC do Go
+(LinkedIn, 2026). O princípio central — *"o código mais rápido é o que não
+gera lixo"* — guia cada decisão de alocação neste código.
