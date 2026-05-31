@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"rinha-backend/internal/codec"
 	"rinha-backend/internal/index"
 	"rinha-backend/internal/vector"
 )
@@ -75,17 +74,19 @@ func TestFraudScore(t *testing.T) {
 		t.Errorf("Expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Decode binary response
-	if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
-		t.Errorf("Expected Content-Type application/octet-stream, got %s", ct)
+	// Verify JSON response (no longer binary codec)
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Expected Content-Type application/json, got %s", ct)
 	}
 
-	resp, err := codec.DecodeResponse(rec.Body)
-	if err != nil {
-		t.Fatalf("Failed to decode binary response: %v", err)
-	}
-	if resp.FraudScore < 0 || resp.FraudScore > 1.0 {
-		t.Errorf("FraudScore out of range [0,1]: %f", resp.FraudScore)
+	body := rec.Body.String()
+	if body != `{"approved":true,"fraud_score":0.0}` &&
+		body != `{"approved":true,"fraud_score":0.2}` &&
+		body != `{"approved":true,"fraud_score":0.4}` &&
+		body != `{"approved":false,"fraud_score":0.6}` &&
+		body != `{"approved":false,"fraud_score":0.8}` &&
+		body != `{"approved":false,"fraud_score":1.0}` {
+		t.Errorf("Unexpected fraud response: %s", body)
 	}
 }
 

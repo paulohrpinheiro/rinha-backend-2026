@@ -1,19 +1,17 @@
-.PHONY: build test bench bench-go bench-load docker-build docker-push docker-tag-latest docker-up docker-down docker-logs docker-up-submission submission-file clean all warmup
+.PHONY: build test bench bench-go bench-load docker-build docker-push docker-tag-latest docker-up docker-down docker-logs docker-up-submission submission-file clean all
 
 BINARY_API    := bin/api
-BINARY_PROXY  := bin/proxy
 LDFLAGS       := -s -w
 GOBUILD       := CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -trimpath
 
 # Docker Hub settings
 IMAGE_NAME_API   ?= paulohrpinheiro/rinha-api
-IMAGE_NAME_PROXY ?= paulohrpinheiro/rinha-proxy
+IMAGE_NAME_NGINX ?= paulohrpinheiro/rinha-nginx
 VERSION          ?= latest
 
 build:
 	@mkdir -p bin
 	$(GOBUILD) -o $(BINARY_API) ./cmd/api
-	$(GOBUILD) -o $(BINARY_PROXY) ./cmd/proxy
 
 test:
 	go test ./... -v
@@ -31,17 +29,17 @@ bench-load:
 
 docker-build:
 	docker build -t $(IMAGE_NAME_API):$(VERSION) -f Dockerfile.api .
-	docker build -t $(IMAGE_NAME_PROXY):$(VERSION) -f Dockerfile.proxy .
+	docker build -t $(IMAGE_NAME_NGINX):$(VERSION) -f Dockerfile.nginx .
 
 docker-push:
 	docker push $(IMAGE_NAME_API):$(VERSION)
-	docker push $(IMAGE_NAME_PROXY):$(VERSION)
+	docker push $(IMAGE_NAME_NGINX):$(VERSION)
 
 docker-tag-latest:
 	docker tag $(IMAGE_NAME_API):$(VERSION) $(IMAGE_NAME_API):latest
-	docker tag $(IMAGE_NAME_PROXY):$(VERSION) $(IMAGE_NAME_PROXY):latest
+	docker tag $(IMAGE_NAME_NGINX):$(VERSION) $(IMAGE_NAME_NGINX):latest
 	docker push $(IMAGE_NAME_API):latest
-	docker push $(IMAGE_NAME_PROXY):latest
+	docker push $(IMAGE_NAME_NGINX):latest
 
 docker-up:
 	docker compose up -d
@@ -59,7 +57,7 @@ docker-up-submission:
 # with the current VERSION baked into image tags.
 # Usage: make submission-file VERSION=v2 > /tmp/dc.yml
 submission-file:
-	@sed 's|image: $(IMAGE_NAME_API):.*|image: $(IMAGE_NAME_API):$(VERSION)|g; s|image: $(IMAGE_NAME_PROXY):.*|image: $(IMAGE_NAME_PROXY):$(VERSION)|g' docker-compose.submission.yml
+	@sed 's|image: $(IMAGE_NAME_API):.*|image: $(IMAGE_NAME_API):$(VERSION)|g; s|image: $(IMAGE_NAME_NGINX):.*|image: $(IMAGE_NAME_NGINX):$(VERSION)|g' docker-compose.submission.yml
 
 clean:
 	rm -rf bin/

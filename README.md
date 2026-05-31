@@ -2,30 +2,29 @@
 
 API de detecção de fraude usando **busca vetorial com IVF index** em **Go 1.26.3** com **zero dependências externas**.
 
-> **Stack**: Go 1.26.3 · IVF · Manhattan · int8 quantization
-> **Limites**: 1 CPU · 350 MB RAM · 3 serviços (proxy + 2 APIs)
-> **Porta**: 9999 (proxy)
+> **Stack**: Go 1.26.3 · IVF · Manhattan · int8 quantization · nginx
+> **Limites**: 1 CPU · 350 MB RAM · 3 serviços (nginx + 2 APIs)
+> **Porta**: 9999 (nginx)
 
 ---
 
 ## Arquitetura
 
-Client -> Proxy -> API #1 e API #2 (round-robin)
+Client -> nginx -> API #1 e API #2 (least_conn)
 
 | Serviço | CPU | Memória | Função |
 |---------|:---:|:-------:|--------|
-| proxy   | 0.19 | 20 MB | Load balancer round-robin + /ready + /debug/vars |
-| api-1   | 0.405 | 165 MB | Detecção de fraude (IVF, parser JSON manual, /debug/vars) |
-| api-2   | 0.405 | 165 MB | Detecção de fraude (IVF, parser JSON manual, /debug/vars) |
+| nginx   | 0.19 | 20 MB | Load balancer least_conn sobre Unix sockets |
+| api-1   | 0.405 | 165 MB | Detecção de fraude (IVF, parser JSON manual) |
+| api-2   | 0.405 | 165 MB | Detecção de fraude (IVF, parser JSON manual) |
 | Total   | 1.0 | 350 MB | — |
 
-**Protocolo**: O proxy recebe JSON do cliente e o encaminha **bruto** (sem parsing)
-para as APIs via Unix socket. As APIs fazem parsing JSON manual byte-a-byte
-(zero alocações, zero reflection) e respondem com 9 bytes binários (codec).
-O proxy decodifica a resposta binária e retorna JSON pré-computado ao cliente.
+**Protocolo**: O nginx recebe JSON do cliente e o encaminha **bruto** (sem parsing)
+para as APIs via Unix socket (stream TCP). As APIs fazem parsing JSON manual byte-a-byte
+(zero alocações, zero reflection) e respondem com JSON pré-computado.
 
-**Evolução**: v34 removeu o codec binário de ida (proxy↔API), substituindo por
-JSON bruto + parser manual na API — reduziu HTTP errors em 67%.
+**Evolução**: v34 removeu o codec binário de ida (proxy↔API), v51 substituiu o proxy
+Go customizado por nginx:alpine — load balance nativo, zero código de proxy para manter.
 
 ---
 
@@ -33,32 +32,23 @@ JSON bruto + parser manual na API — reduziu HTTP errors em 67%.
 
 ### `GET /ready`
 
-Verificação de prontidão. O **proxy** consulta o `/ready` de cada backend (api-1 e api-2):
+Verificação de prontidão. O **nginx** encaminha o `/ready` para qualquer API disponível via least_conn:
 
 | Estado dos backends | Resposta |
 |---|---|
-| Todos respondem 2xx | **HTTP 200** `{"status":"ok","backends":[...]}` |
-| Algum falha | **HTTP 503** `{"status":"degraded","backends":[...]}` |
+| Pelo menos um backend responde 2xx | **HTTP 200** `{"status":"ok"}` |
+| Nenhum backend disponível | **HTTP 502** (nginx) |
 
 Isoladamente, cada API também expõe `GET /ready` na porta 8080, respondendo 200 assim que o índice IVF pré-construído é carregado (menos de 1 segundo).
 
-### `GET /debug/vars` (proxy e APIs)
+### `GET /debug/vars` (APIs, porta 8080)
 
-Endpoint de diagnóstico que expõe contadores internos em JSON. Permite rastrear
-exatamente onde as requisições se perdem no pipeline, sem logar em disco.
-
-**Proxy** (`GET /debug/vars` na porta 9999):
-- `requests_received`, `requests_forwarded`, `responses_received`
-- `backend_errors`, `api_errors`, `decode_errors`
-- `semaphore_503s`, `parse_errors`, `encode_errors`, `read_errors`
-
-**API** (`GET /debug/vars` na porta 8080):
-- `requests_received`, `responses_sent`
-- `decode_errors`, `read_errors`, `search_errors`, `semaphore_503s`
+Cada API expõe contadores internos em JSON individualmente na porta 8080.
+Com nginx como proxy, o `/debug/vars` não está mais disponível na porta 9999.
 
 ### `POST /fraud-score`
 
-Processa a transação e retorna a decisão de fraude. O proxy distribui as requisições em round-robin entre api-1 e api-2. Consulte [docs/API.md](./docs/API.md) para o contrato completo.
+Processa a transação e retorna a decisão de fraude. O nginx distribui as requisições em least_conn entre api-1 e api-2 via Unix sockets. Consulte [docs/API.md](./docs/API.md) para o contrato completo.
 
 ---
 
@@ -67,7 +57,8 @@ Processa a transação e retorna a decisão de fraude. O proxy distribui as requ
 ```
 cmd/
   api/main.go          # Servidor HTTP da API
-  proxy/main.go        # Load balancer round-robin com /ready local
+nginx/
+  nginx.conf           # Configuração do nginx (least_conn + Unix sockets)
 internal/
   model/types.go       # Tipos: payload, resposta, normalização
   vector/normalize.go  # Vetor 14-dim + quantização int8 + Manhattan
@@ -91,7 +82,7 @@ resources/             # Dataset + índice pré-construído
   normalization.json   # Constantes de normalização
   index.bin            # Índice IVF pré-construído (gerado no docker build)
 Dockerfile.api         # Multi-stage: golang -> scratch
-Dockerfile.proxy       # Multi-stage: golang -> scratch
+Dockerfile.nginx       # nginx:alpine + config
 docker-compose.yml     # Orquestração local (com build)
 docker-compose.submission.yml # Orquestração para submission (Docker Hub)
 Makefile               # build, test, docker, push, submission-prep
@@ -104,28 +95,25 @@ README.md              # Este arquivo
 
 ## Resultados do Teste Oficial (Evolução)
 
-> Última submissão: **v39** (commit pendente) · Aguardando resultado
-> Docker Hub: `paulohrpinheiro/rinha-proxy:v39` + `rinha-api:v39`
+> Última submissão: **v50** · score +1149
+> Docker Hub: `paulohrpinheiro/rinha-proxy:v50` + `rinha-api:v50`
 
-### 🏆 Melhor resultado: +1082 (v38)
+### 🏆 Melhor resultado: +1149 (v50)
 
 | Componente | Valor | Corte |
 |:-----------|:-----:|:-----:|
-| `score_p99` | **+709** | p99 = 195.23ms < 2000ms ✅ |
-| `score_det` | **+373** | failure_rate = 2.23% (< 15%) ✅ |
-| **Final** | **+1082** | Primeiro score positivo! 🎉 |
+| `score_p99` | **+742** | p99 = 181.27ms < 2000ms ✅ |
+| `score_det` | **+407** | failure_rate = 2.18% (< 15%) ✅ |
+| **Final** | **+1149** | Novo recorde! 🏆 |
 
-| Métrica | v38 | v37 (baseline) | Delta |
+| Métrica | v50 | v44 (baseline) | Delta |
 |:--------|:---:|:---:|:-----:|
-| HTTP errors | 57 | 1.587 | −96.4% ✅ |
-| TP + TN (corretos) | 52.798 | 44.661 | +18.2% ✅ |
-| FP | 733 | 609 | +124 |
-| FN | 413 | 354 | +59 |
-| Processados (total) | 54.001 | 47.211 | +14.4% ✅ |
-| Failure rate | 2.23% | 5.4% | −3.17pp ✅ |
-| **p99** | **195.23ms** | 2001.26ms | **−90.2% ✅** |
-| Detection score | **+373** | −503 | +876 ✅ |
-| Final score | **+1082** | −3503 | **+4585 ✅** |
+| HTTP errors | **31** | 67 | **−53.7%** ✅ |
+| FP | **735** | 735 | **0** |
+| FN | **411** | 413 | **−2** |
+| **p99** | **181ms** | 192ms | **−5.7%** ✅ |
+| Detection score | **+407** | +360 | +47 |
+| Final score | **+1149** | +1076 | **+73** ✅ |
 
 ### Resultado v39: nprobe=3 — neutro
 
@@ -225,9 +213,9 @@ weighted KNN, zerar HTTP errors).
 | v42 | reverte K=5 + diag | 70 | 2.3% | 192ms | +1075 |
 | v43 | int16+Euclidiana ❌ | 56 | 35.9% | 198ms | −2296 |
 | v44 | reverte int8 (platô) | 67 | 2.3% | 192ms | +1076 |
+| **v50** | **bump tag + estabilidade** | **31** | **2.2%** | **181ms** | **+1149 🏆** |
 
-> **Platô alcançado**: 3 versões idênticas (v38/v42/v44) com score ~+1075.
-> Config: int8 + Manhattan + K=5 + thr=0.6 + IVF 1000 clusters + nprobe=2.
+> **Platô quebrado**: v50 (+1149) supera o platô de +1076 com p99 6% menor e HTTP errors 54% menores.
 
 ### Marcos da série
 
@@ -237,9 +225,9 @@ weighted KNN, zerar HTTP errors).
 | Primeiro score > −6000 | v20 | −2700 com proxy custom |
 | Detection sem corte | v35 | −565 (failure < 15%) |
 | **Primeiro score positivo** | **v38** | **+1082** 🎉 |
-| Menos HTTP errors | v38 | 57 (−96% vs v37) |
-| Melhor score | v38 | +1082 |
-| Melhor p99 | v38 | 195ms (−90% vs v37) |
+| Menos HTTP errors | v50 | 31 (−54% vs v44) |
+| Melhor score | v50 | **+1149** 🏆 |
+| Melhor p99 | v50 | **181ms** |
 
 ### Lições Aprendidas
 
@@ -382,9 +370,9 @@ no teste oficial (a diferença está no ambiente de rede e perfil de ramp-up do 
 
 Multi-stage build com scratch:
 - Dockerfile.api: binário API (~5 MB) + dataset + índice IVF pré-construído (~45 MB)
-- Dockerfile.proxy: binário Proxy (~3 MB)
+- Dockerfile.nginx: nginx:alpine com config (~22 MB)
 
-Imagens finais: ~51 MB (API), ~3 MB (proxy), sem shell ou libc.
+Imagens finais: ~51 MB (API), ~22 MB (nginx), sem shell ou libc.
 
 ### Índice pré-construído
 Durante o Docker build, a API executa `api -build-index /resources/index.bin` para gerar o índice IVF a partir do `references.json.gz`. Esse índice binário é copiado para a imagem final, eliminando o processamento de startup (~90s → <1s). Se o `index.bin` não existir (desenvolvimento local sem Docker), o carregamento completo do JSON é usado como fallback.

@@ -3,23 +3,17 @@ volumes:
     driver: local
 
 services:
-  proxy:
-    image: paulohrpinheiro/rinha-proxy:v37
+  nginx:
+    image: paulohrpinheiro/rinha-nginx:v37
     ports:
       - "9999:9999"
-    environment:
-      - BACKENDS=http://api-1:8080,http://api-2:8080
-      - PORT=9999
-      - UNIX_SOCKET_DIR=/run/sock
+    volumes:
+      - sock:/run/sock:rw
     depends_on:
-      api-1:
-        condition: service_started
-      api-2:
-        condition: service_started
+      - api-1
+      - api-2
     networks:
       - rinha-net
-    volumes:
-      - sock:/run/sock
     deploy:
       resources:
         limits:
@@ -63,8 +57,6 @@ services:
         limits:
           cpus: "0.405"
           memory: "165MB"
-
-# warmup removed: runs inline in the API binary (handler.Warmup())
 
 networks:
   rinha-net:

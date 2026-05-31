@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"rinha-backend/internal/codec"
 	"rinha-backend/internal/index"
 	"rinha-backend/internal/parser"
 	"rinha-backend/internal/vector"
@@ -32,6 +31,17 @@ type APICounters struct {
 }
 
 var apiCounters APICounters
+
+// fraudResponses holds 6 pre-built JSON responses (zero serialization in hot path).
+// Index by fraud count (0-5) from the IVF search result.
+var fraudResponses = [6][]byte{
+	[]byte(`{"approved":true,"fraud_score":0.0}`),
+	[]byte(`{"approved":true,"fraud_score":0.2}`),
+	[]byte(`{"approved":true,"fraud_score":0.4}`),
+	[]byte(`{"approved":false,"fraud_score":0.6}`),
+	[]byte(`{"approved":false,"fraud_score":0.8}`),
+	[]byte(`{"approved":false,"fraud_score":1.0}`),
+}
 
 // payloadPool reuses codec.Payload structs and their internal buffers
 // (rawBuf, KnownMerchants slice) across requests, avoiding allocations.
@@ -126,27 +136,17 @@ func (h *FraudHandler) FraudScore(w http.ResponseWriter, r *http.Request) {
 	fraudCount, err := h.index.Search(&queryVec)
 	if err != nil {
 		apiCounters.SearchErrors.Add(1)
-		// Silent fallback
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"approved":true,"fraud_score":0.0}`))
+		w.Write(fraudResponses[0])
 		return
 	}
 
 	// 5. Calculate fraud score and decision
-	fraudScore := float64(fraudCount) / 5.0
-	approved := fraudScore < 0.6
+	fraudIndex := fraudCount
+	if fraudIndex < 0 { fraudIndex = 0 } else if fraudIndex > 5 { fraudIndex = 5 }
 
-	// 6. Write binary response (9 bytes: approved bool + fraud_score float64)
-	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-
-	if err := codec.EncodeResponse(w, codec.Response{
-		Approved:   approved,
-		FraudScore: fraudScore,
-	}); err != nil {
-		return
-	}
+	w.Write(fraudResponses[fraudIndex])
 
 	apiCounters.ResponsesSent.Add(1)
 }
